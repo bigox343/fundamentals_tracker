@@ -1,0 +1,26 @@
+{
+  "0q": {
+    "upLast7days": 1,
+    "upLast30days": 5,
+    "downLast30days": 0,
+    "downLast7Days": 0
+  },
+  "+1q": {
+    "upLast7days": 1,
+    "upLast30days": 5,
+    "downLast30days": 0,
+    "downLast7Days": 0
+  },
+  "0y": {
+    "upLast7days": 2,
+    "upLast30days": 4,
+    "downLast30days": 0,
+    "downLast7Days": 0
+  },
+  "+1y": {
+    "upLast7days": 2,
+    "upLast30days": 4,
+    "downLast30days": 0,
+    "downLast7Days": 0
+  }
+}

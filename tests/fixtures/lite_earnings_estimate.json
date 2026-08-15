@@ -1,0 +1,34 @@
+{
+  "0q": {
+    "avg": 2.9689200000000002,
+    "low": 2.87,
+    "high": 3.07658,
+    "yearAgoEps": 0.88,
+    "numberOfAnalysts": 20,
+    "growth": 2.3738
+  },
+  "+1q": {
+    "avg": 5.01354,
+    "low": 4.6,
+    "high": 5.37,
+    "yearAgoEps": 1.67,
+    "numberOfAnalysts": 21,
+    "growth": 2.0021
+  },
+  "0y": {
+    "avg": 8.22662,
+    "low": 19.05,
+    "high": 25.27,
+    "yearAgoEps": 8.22662,
+    "numberOfAnalysts": 23,
+    "growth": 0
+  },
+  "+1y": {
+    "avg": 33.01317,
+    "low": 24.84,
+    "high": 38.4,
+    "yearAgoEps": 8.22662,
+    "numberOfAnalysts": 20,
+    "growth": 3.0129998
+  }
+}

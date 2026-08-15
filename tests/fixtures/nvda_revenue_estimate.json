@@ -1,0 +1,34 @@
+{
+  "0q": {
+    "avg": 91956584330,
+    "low": 90302000000,
+    "high": 96655000000,
+    "numberOfAnalysts": 43,
+    "yearAgoRevenue": 46743000000,
+    "growth": 0.96730006
+  },
+  "+1q": {
+    "avg": 103378458750,
+    "low": 91996000000,
+    "high": 112149000000,
+    "numberOfAnalysts": 41,
+    "yearAgoRevenue": 57006000000,
+    "growth": 0.8135
+  },
+  "0y": {
+    "avg": 393928480900,
+    "low": 358367000000,
+    "high": 418025459420,
+    "numberOfAnalysts": 53,
+    "yearAgoRevenue": 215938000000,
+    "growth": 0.8243
+  },
+  "+1y": {
+    "avg": 562143085840,
+    "low": 416398000000,
+    "high": 710010000000,
+    "numberOfAnalysts": 55,
+    "yearAgoRevenue": 393928480900,
+    "growth": 0.42700002
+  }
+}

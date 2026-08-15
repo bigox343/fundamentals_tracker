@@ -1,0 +1,30 @@
+{
+  "0q": {
+    "current": 2.0838,
+    "7daysAgo": 2.08051,
+    "30daysAgo": 2.07846,
+    "60daysAgo": 2.07667,
+    "90daysAgo": 1.9626000000000001
+  },
+  "+1q": {
+    "current": 2.35237,
+    "7daysAgo": 2.34527,
+    "30daysAgo": 2.33963,
+    "60daysAgo": 2.33883,
+    "90daysAgo": 2.19094
+  },
+  "0y": {
+    "current": 8.95773,
+    "7daysAgo": 8.96139,
+    "30daysAgo": 8.94722,
+    "60daysAgo": 8.92355,
+    "90daysAgo": 8.38125
+  },
+  "+1y": {
+    "current": 12.79836,
+    "7daysAgo": 12.81462,
+    "30daysAgo": 12.73899,
+    "60daysAgo": 12.64277,
+    "90daysAgo": 11.42982
+  }
+}
