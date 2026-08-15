@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(chmod +x run_weekly.sh)",
+      "Bash(plutil -lint ~/Library/LaunchAgents/com.owen.fundamentals-tracker.plist)",
+      "Bash(/Users/owen/Desktop/fundamentals_tracker/run_weekly.sh)",
+      "Bash(echo \"WRAPPER EXIT=$?\")",
+      "Bash(node --check /private/tmp/claude-501/-Users-owen-Desktop-fundamentals-tracker/28b65ae0-98e2-4e5f-a68e-8a84f6ebe8cf/scratchpad/dash.js)",
+      "Bash(/Users/owen/opt/anaconda3/envs/py312/bin/python3 -c ' *)",
+      "Bash(gh auth *)",
+      "Bash(git --version)",
+      "Bash(curl -sS -m 15 https://api.github.com/users/bigox343/repos?per_page=100)",
+      "Bash(curl -sS -m 15 \"https://api.github.com/users/bigox343/repos?per_page=100\")",
+      "Bash(git init *)",
+      "Bash(git symbolic-ref *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Initial commit: weekly fundamentals tracker *)"
+    ]
+  }
+}

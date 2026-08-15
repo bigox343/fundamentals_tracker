@@ -1,0 +1,144 @@
+==============================================================
+run start: 2026-08-15 13:17:04 EDT
+Fetching fundamentals...
+  [  1/137] NVDA   Semiconductors
+  [  2/137] AVGO   Semiconductors
+  [  3/137] AMD    Semiconductors
+  [  4/137] QCOM   Semiconductors
+  [  5/137] TXN    Semiconductors
+  [  6/137] INTC   Semiconductors
+  [  7/137] MU     Semiconductors
+  [  8/137] ADI    Semiconductors
+  [  9/137] NXPI   Semiconductors
+  [ 10/137] MRVL   Semiconductors
+  [ 11/137] ON     Semiconductors
+  [ 12/137] MCHP   Semiconductors
+  [ 13/137] ARM    Semiconductors
+  [ 14/137] AMAT   Semicap Equipment
+  [ 15/137] LRCX   Semicap Equipment
+  [ 16/137] KLAC   Semicap Equipment
+  [ 17/137] ASML   Semicap Equipment
+  [ 18/137] TER    Semicap Equipment
+  [ 19/137] ENTG   Semicap Equipment
+  [ 20/137] MSFT   Software — Infrastructure
+  [ 21/137] ORCL   Software — Infrastructure
+  [ 22/137] PANW   Software — Infrastructure
+  [ 23/137] CRWD   Software — Infrastructure
+  [ 24/137] FTNT   Software — Infrastructure
+  [ 25/137] DDOG   Software — Infrastructure
+  [ 26/137] SNOW   Software — Infrastructure
+  [ 27/137] MDB    Software — Infrastructure
+  [ 28/137] NET    Software — Infrastructure
+  [ 29/137] ZS     Software — Infrastructure
+  [ 30/137] CRM    Software — Applications
+  [ 31/137] ADBE   Software — Applications
+  [ 32/137] NOW    Software — Applications
+  [ 33/137] INTU   Software — Applications
+  [ 34/137] WDAY   Software — Applications
+  [ 35/137] TEAM   Software — Applications
+  [ 36/137] HUBS   Software — Applications
+  [ 37/137] VEEV   Software — Applications
+  [ 38/137] ADSK   Software — Applications
+  [ 39/137] SNPS   Software — Applications
+  [ 40/137] CDNS   Software — Applications
+  [ 41/137] GOOGL  Internet
+  [ 42/137] META   Internet
+  [ 43/137] SPOT   Internet
+  [ 44/137] PINS   Internet
+  [ 45/137] SNAP   Internet
+  [ 46/137] TTD    Internet
+  [ 47/137] RDDT   Internet
+  [ 48/137] NFLX   Media & Entertainment
+  [ 49/137] DIS    Media & Entertainment
+  [ 50/137] CMCSA  Media & Entertainment
+  [ 51/137] WBD    Media & Entertainment
+  [ 52/137] LYV    Media & Entertainment
+  [ 53/137] EA     Media & Entertainment
+  [ 54/137] TTWO   Media & Entertainment
+  [ 55/137] RBLX   Media & Entertainment
+  [ 56/137] TMUS   Telecom
+  [ 57/137] VZ     Telecom
+  [ 58/137] T      Telecom
+  [ 59/137] CHTR   Telecom
+  [ 60/137] AAPL   Hardware & Networking
+  [ 61/137] CSCO   Hardware & Networking
+  [ 62/137] DELL   Hardware & Networking
+  [ 63/137] SMCI   Hardware & Networking
+  [ 64/137] ANET   Hardware & Networking
+  [ 65/137] WDC    Hardware & Networking
+  [ 66/137] STX    Hardware & Networking
+  [ 67/137] NTAP   Hardware & Networking
+  [ 68/137] MSI    Hardware & Networking
+  [ 69/137] GLW    Hardware & Networking
+  [ 70/137] IBM    IT Services
+  [ 71/137] ACN    IT Services
+  [ 72/137] CTSH   IT Services
+  [ 73/137] INFY   IT Services
+  [ 74/137] EPAM   IT Services
+  [ 75/137] BA     Aerospace & Defense
+  [ 76/137] RTX    Aerospace & Defense
+  [ 77/137] LMT    Aerospace & Defense
+  [ 78/137] GD     Aerospace & Defense
+  [ 79/137] NOC    Aerospace & Defense
+  [ 80/137] LHX    Aerospace & Defense
+  [ 81/137] TDG    Aerospace & Defense
+  [ 82/137] HWM    Aerospace & Defense
+  [ 83/137] CAT    Machinery
+  [ 84/137] DE     Machinery
+  [ 85/137] CMI    Machinery
+  [ 86/137] PCAR   Machinery
+  [ 87/137] ITW    Machinery
+  [ 88/137] PH     Machinery
+  [ 89/137] DOV    Machinery
+  [ 90/137] UNP    Transport & Logistics
+  [ 91/137] CSX    Transport & Logistics
+  [ 92/137] NSC    Transport & Logistics
+  [ 93/137] UPS    Transport & Logistics
+  [ 94/137] FDX    Transport & Logistics
+  [ 95/137] ODFL   Transport & Logistics
+  [ 96/137] GE     Electrical Equipment
+  [ 97/137] HON    Electrical Equipment
+  [ 98/137] ETN    Electrical Equipment
+  [ 99/137] EMR    Electrical Equipment
+  [100/137] ROK    Electrical Equipment
+  [101/137] AME    Electrical Equipment
+  [102/137] MMM    Multi-Industrial
+  [103/137] CARR   Multi-Industrial
+  [104/137] JCI    Multi-Industrial
+  [105/137] IR     Multi-Industrial
+  [106/137] AMZN   Internet Retail
+  [107/137] BKNG   Internet Retail
+  [108/137] ABNB   Internet Retail
+  [109/137] DASH   Internet Retail
+  [110/137] EBAY   Internet Retail
+  [111/137] CHWY   Internet Retail
+  [112/137] WMT    Broadline & Specialty Retail
+  [113/137] COST   Broadline & Specialty Retail
+  [114/137] TGT    Broadline & Specialty Retail
+  [115/137] HD     Broadline & Specialty Retail
+  [116/137] LOW    Broadline & Specialty Retail
+  [117/137] TJX    Broadline & Specialty Retail
+  [118/137] ROST   Broadline & Specialty Retail
+  [119/137] PG     Staples
+  [120/137] KO     Staples
+  [121/137] PEP    Staples
+  [122/137] PM     Staples
+  [123/137] MO     Staples
+  [124/137] MDLZ   Staples
+  [125/137] CL     Staples
+  [126/137] KMB    Staples
+  [127/137] MCD    Restaurants
+  [128/137] SBUX   Restaurants
+  [129/137] CMG    Restaurants
+  [130/137] YUM    Restaurants
+  [131/137] QSR    Restaurants
+  [132/137] DRI    Restaurants
+  [133/137] TSLA   Autos & Apparel
+  [134/137] GM     Autos & Apparel
+  [135/137] F      Autos & Apparel
+  [136/137] NKE    Autos & Apparel
+  [137/137] LULU   Autos & Apparel
+Fetching SPX snapshot...
+
+Wrote /Users/owen/Desktop/fundamentals_tracker/dashboard.html  (137 companies)
+run OK:   2026-08-15 13:18:10 EDT
