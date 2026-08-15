@@ -1,12 +1,18 @@
 #!/bin/bash
-# Weekly driver for the fundamentals tracker, invoked by the LaunchAgent
-# com.owen.fundamentals-tracker. Safe to run by hand too:  ./run_weekly.sh
+# Daily driver for the fundamentals tracker, invoked by the LaunchAgent
+# com.owen.fundamentals-tracker. Safe to run by hand too:  ./run_daily.sh
+#
+# Raw CSVs in data/ are never pruned: they are the durable record from which
+# history.db is rebuilt, and the estimate files cannot be refetched.
+#
+# No locking here -- build_dashboard.py takes an fcntl lock itself, because
+# macOS ships no flock(1).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="/Users/owen/opt/anaconda3/envs/py312/bin/python3"
 LOG_DIR="$ROOT/logs"
-LOG="$LOG_DIR/weekly.log"
+LOG="$LOG_DIR/run.log"
 
 mkdir -p "$LOG_DIR"
 
@@ -29,8 +35,5 @@ if [ $status -eq 0 ]; then
 else
   echo "run FAILED (exit $status): $(date '+%Y-%m-%d %H:%M:%S %Z')" >> "$LOG"
 fi
-
-# prune raw CSVs older than a year; the dashboard only needs the newest
-find "$ROOT/data" -name 'fundamentals_*.csv' -type f -mtime +365 -delete 2>/dev/null
 
 exit $status

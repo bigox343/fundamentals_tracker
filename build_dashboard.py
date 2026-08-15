@@ -19,17 +19,23 @@ separation (OKLab ΔE 2.9 vs the 8.0 target); blue/red clears it at 20.4.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import glob
 import json
 import math
+import os
 import sys
 import time
 import warnings
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
+
+import extract
+import history
 
 warnings.filterwarnings("ignore")
 
@@ -127,6 +133,7 @@ PROXY_ETFS: dict[str, str | None] = {
 }
 
 HIST_PERIOD = "1y"     # how much daily history to pull (YTD/1Y need the full year)
+STORE_PERIOD = "5y"    # how much daily history the history store keeps
 SPARK_DAYS = 126       # trading days in the sparkline window (~6 months)
 SPARK_POINTS = 40      # points actually plotted, downsampled from SPARK_DAYS
 WIN_1M = 22            # trading days ~ 1 month
@@ -265,19 +272,21 @@ def fetch_all() -> pd.DataFrame:
 # Price history: one bulk download feeds both the per-ticker sparklines and    #
 # the proxy-ETF band returns.                                                  #
 # --------------------------------------------------------------------------- #
-def fetch_closes(symbols: list[str]) -> pd.DataFrame:
+def fetch_closes(symbols: list[str], period: str = HIST_PERIOD) -> pd.DataFrame:
     """Adjusted daily closes for `symbols`, columns keyed by the input symbol.
 
     yfinance wants BF-B where the universe lists BF.B, so download under the
     dashed form and rename back. One batched call — no per-ticker throttling
     needed here, unlike the `.info` pulls in fetch_all().
+
+    The dashboard asks for HIST_PERIOD; the history store asks for STORE_PERIOD.
     """
     if not symbols:
         return pd.DataFrame()
     yh = {s: s.replace(".", "-") for s in symbols}
     try:
         raw = yf.download(
-            list(dict.fromkeys(yh.values())), period=HIST_PERIOD, interval="1d",
+            list(dict.fromkeys(yh.values())), period=period, interval="1d",
             auto_adjust=True, progress=False, threads=True,
         )
     except Exception as e:
@@ -1180,12 +1189,76 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+LOCK_PATH = ROOT / ".run.lock"
+
+
+@contextmanager
+def single_instance():
+    """Refuse to run twice at once.
+
+    A daily LaunchAgent can fire while a slow run is still going. macOS has no
+    flock(1), so the lock is taken here with fcntl; the OS releases it when the
+    process exits, which means no stale lock file to clean up.
+    """
+    handle = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        print("Another run is in progress; exiting.")
+        sys.exit(0)
+    try:
+        handle.write(str(os.getpid()))
+        handle.flush()
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def record_history(df, closes, est_rows, as_of, failed):
+    """Persist one day's observations. Never fatal to the dashboard build."""
+    conn = history.connect()
+    try:
+        history.ensure_schema(conn)
+        run_id = history.start_run(conn)
+        written = history.ingest_snapshot(conn, df, as_of)
+        history.upsert_companies(conn, df)
+        written += history.ingest_prices(conn, closes)
+        written += history.upsert_rows(conn, est_rows)
+        history.finish_run(
+            conn, run_id, "ok",
+            tickers_ok=len(df) - len(failed), tickers_failed=len(failed),
+        )
+        print(f"History: {written} rows written for {as_of}")
+    finally:
+        conn.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-fetch", action="store_true",
                     help="rebuild from newest cached CSV instead of pulling live")
+    ap.add_argument("--rebuild-history", action="store_true",
+                    help="drop history.db and rebuild it from the raw CSVs")
     args = ap.parse_args()
 
+    if args.rebuild_history:
+        conn = history.connect()
+        try:
+            report = history.rebuild(conn, DATA_DIR)
+        finally:
+            conn.close()
+        print(f"Rebuilt history: {report['rows']} rows from "
+              f"{report['snapshots']} snapshots and "
+              f"{report['estimates']} estimate files")
+        return
+
+    with single_instance():
+        _run(args)
+
+
+def _run(args):
     if args.no_fetch:
         caches = sorted(glob.glob(str(DATA_DIR / "fundamentals_*.csv")))
         if not caches:
@@ -1210,6 +1283,17 @@ def main():
         df = attach_history(df)
         stamp = datetime.now().strftime("%Y%m%d")
         df.to_csv(DATA_DIR / f"fundamentals_{stamp}.csv", index=False)
+
+        as_of = date.today()
+        print("Fetching analyst estimates...")
+        est_rows, failed = extract.collect_estimates(df["ticker"].tolist(), as_of)
+        extract.write_estimates_csv(est_rows, DATA_DIR / f"estimates_{stamp}.csv")
+
+        print("Fetching 5y closes for the history store...")
+        closes = fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD)
+
+        record_history(df, closes, est_rows, as_of.isoformat(), failed)
+
         print("Fetching SPX snapshot...")
         spx = fetch_spx()
 
