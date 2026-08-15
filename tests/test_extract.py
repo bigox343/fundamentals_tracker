@@ -291,6 +291,28 @@ def test_eps_trend_rows_skip_missing_values(eps_trend, nvda_refs):
     assert len(rows) == 19
 
 
+def test_eps_trend_rows_treat_a_zero_lookback_as_missing(eps_trend, nvda_refs):
+    """Yahoo pads a lookback it has no data for with 0.0 rather than NaN.
+
+    Observed on 13 of 148 tickers, always in 90daysAgo and never in a newer
+    column. Stored, HD's FY2027 series reads 0.00 -> 14.96 and the revision is
+    infinite. A missing point must write no row.
+    """
+    eps_trend.loc["0y", "90daysAgo"] = 0.0
+    rows = extract.eps_trend_rows("NVDA", eps_trend, AS_OF, nvda_refs)
+    fy = [r for r in rows if r.ref_period == "FY2027-01-31"]
+    assert len(fy) == 4
+    assert "2026-05-17" not in {r.as_of for r in fy}
+    assert len(rows) == 19
+
+
+def test_eps_trend_rows_keep_legitimate_small_values(eps_trend, nvda_refs):
+    """Only exact zero is the sentinel; a genuinely tiny estimate must survive."""
+    eps_trend.loc["0y", "90daysAgo"] = 0.01
+    rows = extract.eps_trend_rows("NVDA", eps_trend, AS_OF, nvda_refs)
+    assert len(rows) == 20
+
+
 # --------------------------------------------------------------------------- #
 # the point-in-time estimate frames                                            #
 # --------------------------------------------------------------------------- #

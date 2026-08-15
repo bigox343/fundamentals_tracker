@@ -192,7 +192,16 @@ def eps_trend_rows(
             if column not in series.index:
                 continue
             value = series[column]
-            if not is_finite(value):
+            if not is_finite(value) or float(value) == 0.0:
+                # Yahoo pads a lookback column it has no data for with 0.0, not
+                # NaN, and only ever in the oldest column: on 2026-08-15, all 32
+                # zeros across 13 tickers sat in 90daysAgo and none in 60/30/7 or
+                # current, while the point-in-time frames had none at all. Stored,
+                # a zero reads as "consensus was $0.00" and the next observation
+                # renders an infinite revision -- HD went 0.00 -> 14.96. §6.2
+                # requires a missing value to write no row so that "never
+                # observed" stays distinct from a genuine zero, and a real
+                # consensus EPS of exactly 0.00000 does not occur.
                 continue
             observed = (as_of - timedelta(days=offset)).isoformat()
             rows.append(
