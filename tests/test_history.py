@@ -367,6 +367,46 @@ def test_rebuild_reconstructs_from_raw_files(tmp_path, snapshot_df, conn):
     assert _count(conn) == 40
 
 
+def test_rebuild_reports_that_prices_were_not_restored(tmp_path, snapshot_df,
+                                                       conn, closes):
+    """Closes live only in the store, so a rebuild must not claim to have them.
+
+    Silently returning a store that is 93% smaller than the one it replaced
+    looks identical to data loss.
+    """
+    history.ingest_prices(conn, closes)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    snapshot_df.to_csv(data_dir / "fundamentals_20260815.csv", index=False)
+
+    report = history.rebuild(conn, data_dir)
+
+    assert report["prices"] == 0
+
+
+def test_rebuild_round_trips_float_values_exactly(tmp_path, snapshot_df, conn):
+    """A rebuilt store must equal the one it replaced, to the last bit.
+
+    pandas' default CSV float parser is fast rather than exact; without
+    round_trip, 264 of 2761 real snapshot values came back altered in their
+    last two bits.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    history.ingest_snapshot(conn, snapshot_df, "2026-08-15")
+    before = conn.execute(
+        "SELECT ticker, metric, value FROM metrics ORDER BY ticker, metric"
+    ).fetchall()
+
+    snapshot_df.to_csv(data_dir / "fundamentals_20260815.csv", index=False)
+    history.rebuild(conn, data_dir)
+
+    after = conn.execute(
+        "SELECT ticker, metric, value FROM metrics ORDER BY ticker, metric"
+    ).fetchall()
+    assert after == before
+
+
 def test_rebuild_is_idempotent(tmp_path, snapshot_df, conn):
     data_dir = tmp_path / "data"
     data_dir.mkdir()

@@ -304,6 +304,12 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
     The raw dated CSVs are the record of truth, so this is always safe: a
     corrupted or deleted database costs a rebuild, not data. Estimates are
     included precisely because they cannot be refetched.
+
+    Daily closes are the exception and are **not** restored: no CSV holds them,
+    because unlike estimates they can be refetched in full at any time. A
+    rebuilt store is therefore complete in the perishable data and empty of
+    prices until the next normal run repopulates them. `report['prices']`
+    reports the shortfall so a caller cannot mistake the gap for data loss.
     """
     import extract  # local import: history must not depend on extract at load
 
@@ -319,7 +325,10 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
         as_of = as_of_from_filename(path)
         if as_of is None:
             continue
-        frame = pd.read_csv(path)
+        # round_trip for the same reason read_estimates_csv needs it: the
+        # default parser is inexact, and a snapshot is a point-in-time
+        # observation that cannot be refetched either.
+        frame = pd.read_csv(path, float_precision="round_trip")
         report["rows"] += ingest_snapshot(conn, frame, as_of)
         upsert_companies(conn, frame)
         report["snapshots"] += 1
@@ -330,6 +339,9 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
         report["rows"] += upsert_rows(conn, extract.read_estimates_csv(path))
         report["estimates"] += 1
 
+    report["prices"] = conn.execute(
+        "SELECT COUNT(*) FROM metrics WHERE period_type = 'daily'"
+    ).fetchone()[0]
     return report
 
 

@@ -1252,6 +1252,9 @@ def main():
         print(f"Rebuilt history: {report['rows']} rows from "
               f"{report['snapshots']} snapshots and "
               f"{report['estimates']} estimate files")
+        if not report["prices"]:
+            print("  no daily closes restored — they live only in the store, "
+                  "being refetchable. The next normal run repopulates them.")
         return
 
     with single_instance():
