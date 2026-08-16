@@ -18,7 +18,7 @@ from typing import Sequence
 import pandas as pd
 import yfinance as yf
 
-from history import MetricRow, is_finite
+from history import HoldingRow, InsiderRow, MetricRow, is_finite
 
 # A quarterly statement frame is considered stale when the company has reported
 # more recently than this many days after its newest known quarter end. Normal
@@ -410,6 +410,142 @@ def fetch_ticker_estimates(ticker: str, as_of: date) -> list[MetricRow]:
             continue
         rows.extend(frame_rows(ticker, name, frame, as_of, ref_periods))
     return rows
+
+
+# Re-exported so callers reach for one module: extract owns the fetch-and-write
+# side, and pairing the row type with its column order here keeps the CSV writer
+# and the store from drifting apart.
+HOLDING_COLUMNS: tuple[str, ...] = HoldingRow._fields
+INSIDER_COLUMNS: tuple[str, ...] = InsiderRow._fields
+
+HOLDER_FRAMES = {"institutional_holders": "institution",
+                 "mutualfund_holders": "fund"}
+
+# yfinance returns up to 150 filing lines; the drilldown shows the recent tail
+# and the store keeps what it is given, so this only bounds the fetch.
+INSIDER_LIMIT = 60
+
+
+def _iso(value) -> str | None:
+    if value is None:
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if ts is None or pd.isna(ts):
+        return None
+    return pd.Timestamp(ts).date().isoformat()
+
+
+def holding_rows(ticker: str, kind: str, frame) -> list[HoldingRow]:
+    """Expand a holders frame into rows, dated by each holder's own report date.
+
+    The report date is per row, not per frame: yfinance mixes quarters inside one
+    response (NVDA carried both 2026-03-31 and 2026-06-30), so stamping the frame
+    with a single date would misdate whichever half is older -- and a holder's
+    quarter-over-quarter change would then be measured against the wrong quarter.
+    """
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    rows: list[HoldingRow] = []
+    for rec in frame.to_dict("records"):
+        holder = rec.get("Holder")
+        as_of = _iso(rec.get("Date Reported"))
+        # NaN is truthy, so a bare falsiness check lets a missing holder through
+        # and writes a row keyed on the string "nan".
+        if as_of is None or holder is None or pd.isna(holder) or not str(holder).strip():
+            continue
+        rows.append(HoldingRow(
+            ticker, as_of, kind, str(holder),
+            rec.get("Shares"), rec.get("Value"),
+            rec.get("pctHeld"), rec.get("pctChange"),
+        ))
+    return rows
+
+
+def insider_rows(ticker: str, frame) -> list[InsiderRow]:
+    """Expand an insider-transactions frame into filing lines."""
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    rows: list[InsiderRow] = []
+    for rec in frame.to_dict("records"):
+        as_of = _iso(rec.get("Start Date"))
+        insider = rec.get("Insider")
+        if insider is not None and pd.isna(insider):
+            insider = None
+        # `Text` carries the human description ("Stock Gift at price 0.00"); the
+        # `Transaction` column is frequently blank, so fall back to it rather
+        # than dropping the line.
+        action = rec.get("Transaction") or rec.get("Text") or ""
+        if not as_of or not insider or not str(action).strip():
+            continue
+        rows.append(InsiderRow(
+            ticker, as_of, str(insider), str(rec.get("Position") or ""),
+            str(action).strip(), rec.get("Shares"), rec.get("Value"),
+            str(rec.get("Ownership") or ""),
+        ))
+    return rows
+
+
+def fetch_ticker_ownership(ticker: str):
+    """Pull one company's holder and insider frames.
+
+    Ownership is quarterly and yfinance only ever exposes the current snapshot,
+    so last quarter's list is gone once it rolls -- the same perishability
+    argument that puts estimates in the store.
+    """
+    handle = yf.Ticker(ticker)
+    holds: list[HoldingRow] = []
+    for attr, kind in HOLDER_FRAMES.items():
+        try:
+            holds.extend(holding_rows(ticker, kind, getattr(handle, attr, None)))
+        except Exception:  # noqa: BLE001 - one missing frame must not lose the other
+            continue
+    try:
+        ins = insider_rows(ticker, handle.insider_transactions)[:INSIDER_LIMIT]
+    except Exception:  # noqa: BLE001
+        ins = []
+    return holds, ins
+
+
+def collect_ownership(tickers: Sequence[str]):
+    """Fetch ownership across the universe, tolerating per-ticker failures."""
+    holds: list[HoldingRow] = []
+    ins: list[InsiderRow] = []
+    failed: list[str] = []
+    for i, ticker in enumerate(tickers, 1):
+        try:
+            h, n = fetch_ticker_ownership(ticker)
+            holds.extend(h)
+            ins.extend(n)
+        except Exception as exc:  # noqa: BLE001
+            failed.append(ticker)
+            print(f"  [{i:>3}/{len(tickers)}] {ticker:<6} ownership FAILED: {exc}",
+                  flush=True)
+        else:
+            print(f"  [{i:>3}/{len(tickers)}] {ticker:<6} ownership "
+                  f"({len(h)} holders, {len(n)} filings)", flush=True)
+        time.sleep(FETCH_SLEEP)
+    return holds, ins, failed
+
+
+def write_rows_csv(rows, columns, path: Path) -> int:
+    """Durable record for a table-shaped capture (holdings, insider filings)."""
+    pd.DataFrame(list(rows), columns=list(columns)).to_csv(path, index=False)
+    return len(rows)
+
+
+def read_rows_csv(path: Path, factory, columns):
+    frame = pd.read_csv(path, keep_default_na=False, float_precision="round_trip")
+    out = []
+    for rec in frame.to_dict("records"):
+        vals = []
+        for c in columns:
+            v = rec.get(c, "")
+            if c in ("shares", "value", "pct_held", "pct_change"):
+                vals.append(None if v == "" else float(v))
+            else:
+                vals.append(str(v))
+        out.append(factory(*vals))
+    return out
 
 
 def collect_estimates(

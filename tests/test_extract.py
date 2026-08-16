@@ -440,3 +440,64 @@ def test_read_estimates_csv_preserves_ref_period_as_text(tmp_path, eps_trend,
     back = extract.read_estimates_csv(path)
     assert all(isinstance(r.ref_period, str) for r in back)
     assert all(isinstance(r.as_of, str) for r in back)
+
+
+# --------------------------------------------------------------------------- #
+# ownership: holders and insider filings                                       #
+# --------------------------------------------------------------------------- #
+
+def _holders_frame():
+    """Shaped like yfinance institutional_holders, with mixed report dates.
+
+    The mixed dates are real: NVDA's frame carried both quarters at once.
+    """
+    return pd.DataFrame([
+        {"Date Reported": "2026-06-30", "Holder": "Blackrock Inc.",
+         "pctHeld": 0.0802, "Shares": 1941918386, "Value": 437242350903,
+         "pctChange": 0.0085},
+        {"Date Reported": "2026-03-31", "Holder": "FMR, LLC",
+         "pctHeld": 0.0424, "Shares": 1026051548, "Value": 231025770305,
+         "pctChange": 0.0324},
+    ])
+
+
+def test_holding_rows_date_each_holder_by_its_own_report():
+    rows = extract.holding_rows("NVDA", "institution", _holders_frame())
+    assert [r.as_of for r in rows] == ["2026-06-30", "2026-03-31"]
+    assert {r.kind for r in rows} == {"institution"}
+    assert rows[0].holder == "Blackrock Inc."
+    assert rows[0].pct_change == pytest.approx(0.0085)
+
+
+def test_holding_rows_skip_a_row_with_no_holder_or_date():
+    f = _holders_frame()
+    f.loc[0, "Holder"] = None
+    f.loc[1, "Date Reported"] = None
+    assert extract.holding_rows("NVDA", "institution", f) == []
+
+
+def test_holding_rows_of_empty_frame():
+    assert extract.holding_rows("NVDA", "institution", pd.DataFrame()) == []
+    assert extract.holding_rows("NVDA", "institution", None) == []
+
+
+def test_insider_rows_fall_back_to_the_text_column():
+    """yfinance leaves Transaction blank and puts the action in Text."""
+    f = pd.DataFrame([
+        {"Shares": 2410, "Value": 0, "URL": "", "Text": "Stock Award(Grant) at price 0.00 per share.",
+         "Insider": "NORA JOHNSON SUZANNE M", "Position": "Director",
+         "Transaction": "", "Start Date": "2026-08-10", "Ownership": "D"},
+    ])
+    rows = extract.insider_rows("NVDA", f)
+    assert len(rows) == 1
+    assert rows[0].transaction.startswith("Stock Award")
+    assert rows[0].as_of == "2026-08-10"
+    assert rows[0].position == "Director"
+
+
+def test_insider_rows_skip_lines_with_no_action_at_all():
+    f = pd.DataFrame([
+        {"Shares": 1, "Value": 0, "Text": "", "Insider": "X", "Position": "",
+         "Transaction": "", "Start Date": "2026-08-10", "Ownership": "D"},
+    ])
+    assert extract.insider_rows("NVDA", f) == []

@@ -60,8 +60,47 @@ CREATE TABLE IF NOT EXISTS runs (
   tickers_failed INTEGER
 );
 
+-- Ownership does not fit MetricRow: a row is keyed by *who* holds the stock, not
+-- by a metric name, and carries four numbers at once. Forcing it through
+-- ref_period would overload a column the spec defines as a fiscal period.
+--
+-- as_of is the holder's own "Date Reported", not the run date: yfinance returns
+-- mixed report dates within a single frame (NVDA on 2026-08-16 carried both
+-- 2026-03-31 and 2026-06-30 rows), so a per-frame stamp would misdate half of
+-- them. kind separates the 13F institution list from the fund list, which
+-- overlap by holder name.
+CREATE TABLE IF NOT EXISTS holdings (
+  ticker      TEXT NOT NULL,
+  as_of       TEXT NOT NULL,   -- the holder's report date
+  kind        TEXT NOT NULL,   -- 'institution' | 'fund'
+  holder      TEXT NOT NULL,
+  shares      REAL,
+  value       REAL,
+  pct_held    REAL,
+  pct_change  REAL,            -- quarter over quarter, as reported
+  ingested_at TEXT NOT NULL,
+  PRIMARY KEY (ticker, as_of, kind, holder)
+);
+
+-- One filing line. Shares+transaction+date is not unique on its own (a director
+-- can file two identical gifts on one day), so the insider is in the key too.
+CREATE TABLE IF NOT EXISTS insider_txns (
+  ticker      TEXT NOT NULL,
+  as_of       TEXT NOT NULL,
+  insider     TEXT NOT NULL,
+  position    TEXT,
+  txn_type    TEXT NOT NULL,   -- not `transaction`: reserved word in SQLite
+  shares      REAL,
+  value       REAL,
+  ownership   TEXT,
+  ingested_at TEXT NOT NULL,
+  PRIMARY KEY (ticker, as_of, insider, txn_type, shares)
+);
+
 CREATE INDEX IF NOT EXISTS idx_metric_series ON metrics (ticker, metric, as_of);
 CREATE INDEX IF NOT EXISTS idx_metric_xsec   ON metrics (metric, as_of);
+CREATE INDEX IF NOT EXISTS idx_holdings      ON holdings (ticker, kind, as_of);
+CREATE INDEX IF NOT EXISTS idx_insiders      ON insider_txns (ticker, as_of);
 """
 
 
@@ -343,6 +382,117 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
         "SELECT COUNT(*) FROM metrics WHERE period_type = 'daily'"
     ).fetchone()[0]
     return report
+
+
+class HoldingRow(NamedTuple):
+    """One holder's position in one company, as of that holder's report date."""
+
+    ticker: str
+    as_of: str
+    kind: str          # 'institution' | 'fund'
+    holder: str
+    shares: float | None
+    value: float | None
+    pct_held: float | None
+    pct_change: float | None
+
+
+class InsiderRow(NamedTuple):
+    """One insider filing line."""
+
+    ticker: str
+    as_of: str
+    insider: str
+    position: str
+    transaction: str
+    shares: float | None
+    value: float | None
+    ownership: str
+
+
+HOLDING_COLUMNS: tuple[str, ...] = HoldingRow._fields
+INSIDER_COLUMNS: tuple[str, ...] = InsiderRow._fields
+
+_HOLDINGS_SQL = """
+INSERT INTO holdings
+    (ticker, as_of, kind, holder, shares, value, pct_held, pct_change, ingested_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(ticker, as_of, kind, holder) DO UPDATE SET
+    shares = excluded.shares, value = excluded.value,
+    pct_held = excluded.pct_held, pct_change = excluded.pct_change,
+    ingested_at = excluded.ingested_at
+"""
+
+_INSIDER_SQL = """
+INSERT INTO insider_txns
+    (ticker, as_of, insider, position, txn_type, shares, value, ownership,
+     ingested_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(ticker, as_of, insider, txn_type, shares) DO UPDATE SET
+    position = excluded.position, value = excluded.value,
+    ownership = excluded.ownership, ingested_at = excluded.ingested_at
+"""
+
+
+def _opt(value):
+    """Keep a real number, drop anything else to NULL.
+
+    Unlike `metrics`, these tables allow NULL: a holder row is meaningful even
+    when one of its four numbers is missing, so dropping the whole row would
+    lose the position itself.
+    """
+    return float(value) if is_finite(value) else None
+
+
+def upsert_holdings(conn: sqlite3.Connection, rows: Iterable[HoldingRow]) -> int:
+    stamp = _now()
+    payload = [
+        (r.ticker, r.as_of, r.kind, r.holder, _opt(r.shares), _opt(r.value),
+         _opt(r.pct_held), _opt(r.pct_change), stamp)
+        for r in rows
+        if r.ticker and r.as_of and r.kind and r.holder
+    ]
+    if not payload:
+        return 0
+    conn.executemany(_HOLDINGS_SQL, payload)
+    conn.commit()
+    return len(payload)
+
+
+def upsert_insiders(conn: sqlite3.Connection, rows: Iterable[InsiderRow]) -> int:
+    stamp = _now()
+    payload = [
+        (r.ticker, r.as_of, r.insider, r.position, r.transaction,
+         _opt(r.shares), _opt(r.value), r.ownership, stamp)
+        for r in rows
+        if r.ticker and r.as_of and r.insider and r.transaction
+    ]
+    if not payload:
+        return 0
+    conn.executemany(_INSIDER_SQL, payload)
+    conn.commit()
+    return len(payload)
+
+
+def holdings(conn: sqlite3.Connection, ticker: str, kind: str | None = None):
+    """A company's holders, largest position first."""
+    sql = ("SELECT ticker, as_of, kind, holder, shares, value, pct_held, pct_change "
+           "FROM holdings WHERE ticker = ?")
+    params = [ticker]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    return pd.read_sql_query(sql + " ORDER BY pct_held DESC", conn, params=params)
+
+
+def insiders(conn: sqlite3.Connection, ticker: str, limit: int = 25):
+    """A company's insider filings, most recent first."""
+    return pd.read_sql_query(
+        'SELECT as_of, insider, position, txn_type AS "transaction", '
+        "shares, value, ownership "
+        "FROM insider_txns WHERE ticker = ? ORDER BY as_of DESC LIMIT ?",
+        conn, params=[ticker, int(limit)],
+    )
 
 
 def start_run(conn: sqlite3.Connection) -> str:

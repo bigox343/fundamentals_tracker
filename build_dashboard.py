@@ -1216,7 +1216,7 @@ def single_instance():
         handle.close()
 
 
-def record_history(df, closes, est_rows, as_of, failed):
+def record_history(df, closes, est_rows, as_of, failed, own=None):
     """Persist one day's observations. Never fatal to the dashboard build."""
     conn = history.connect()
     try:
@@ -1226,6 +1226,10 @@ def record_history(df, closes, est_rows, as_of, failed):
         history.upsert_companies(conn, df)
         written += history.ingest_prices(conn, closes)
         written += history.upsert_rows(conn, est_rows)
+        if own:
+            holds, ins = own
+            written += history.upsert_holdings(conn, holds)
+            written += history.upsert_insiders(conn, ins)
         history.finish_run(
             conn, run_id, "ok",
             tickers_ok=len(df) - len(failed), tickers_failed=len(failed),
@@ -1292,10 +1296,18 @@ def _run(args):
         est_rows, failed = extract.collect_estimates(df["ticker"].tolist(), as_of)
         extract.write_estimates_csv(est_rows, DATA_DIR / f"estimates_{stamp}.csv")
 
+        print("Fetching ownership (13F holders, funds, insider filings)...")
+        holds, ins, own_failed = extract.collect_ownership(df["ticker"].tolist())
+        extract.write_rows_csv(holds, extract.HOLDING_COLUMNS,
+                               DATA_DIR / f"holdings_{stamp}.csv")
+        extract.write_rows_csv(ins, extract.INSIDER_COLUMNS,
+                               DATA_DIR / f"insiders_{stamp}.csv")
+
         print("Fetching 5y closes for the history store...")
         closes = fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD)
 
-        record_history(df, closes, est_rows, as_of.isoformat(), failed)
+        record_history(df, closes, est_rows, as_of.isoformat(), failed,
+                       own=(holds, ins))
 
         print("Fetching SPX snapshot...")
         spx = fetch_spx()

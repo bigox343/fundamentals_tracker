@@ -32,11 +32,82 @@ PALETTE = {
 }
 
 
+# How many filing lines the page carries per name. The store keeps everything;
+# this only bounds the embedded payload, and the tail is what a reader scans.
+INSIDER_SHOWN = 15
+
+
+def _detail(conn) -> tuple[dict, dict, dict, dict]:
+    """Per-company panels: snapshot metrics with peer rank, estimates, ownership."""
+    snap = pd.read_sql_query(
+        "SELECT ticker, metric, value FROM metrics WHERE period_type = 'snapshot' "
+        "AND as_of = (SELECT MAX(as_of) FROM metrics WHERE period_type = 'snapshot')",
+        conn,
+    )
+    peers = pd.read_sql_query(
+        "SELECT ticker, subindustry FROM companies", conn
+    ).set_index("ticker").subindustry.to_dict()
+    snap["peer"] = snap.ticker.map(peers)
+    # Percentile within the sub-industry, which is the comparison the dashboard
+    # already scores on -- semis against semis, not against staples.
+    snap["pct"] = snap.groupby(["metric", "peer"]).value.rank(pct=True)
+
+    metrics: dict[str, list] = {}
+    for t, g in snap.groupby("ticker"):
+        metrics[t] = [{"metric": r.metric, "value": float(r.value),
+                       "pct": None if pd.isna(r.pct) else round(float(r.pct), 3)}
+                      for r in g.itertuples()]
+
+    est = pd.read_sql_query(
+        "SELECT ticker, metric, ref_period, value FROM metrics "
+        "WHERE period_type = 'estimate' AND metric != 'epsEst' "
+        "AND as_of = (SELECT MAX(as_of) FROM metrics WHERE period_type = 'estimate')",
+        conn,
+    )
+    estimates: dict[str, list] = {}
+    for t, g in est.groupby("ticker"):
+        estimates[t] = [{"metric": r.metric, "ref": r.ref_period,
+                         "value": float(r.value)} for r in g.itertuples()]
+
+    try:
+        hold = pd.read_sql_query(
+            "SELECT ticker, as_of, kind, holder, shares, value, pct_held, pct_change "
+            "FROM holdings ORDER BY pct_held DESC", conn)
+    except Exception:
+        hold = pd.DataFrame()
+    holders: dict[str, list] = {}
+    if len(hold):
+        for t, g in hold.groupby("ticker"):
+            holders[t] = [{"asOf": r.as_of, "kind": r.kind, "holder": r.holder,
+                           "shares": None if pd.isna(r.shares) else float(r.shares),
+                           "value": None if pd.isna(r.value) else float(r.value),
+                           "pctHeld": None if pd.isna(r.pct_held) else float(r.pct_held),
+                           "pctChange": None if pd.isna(r.pct_change) else float(r.pct_change)}
+                          for r in g.itertuples()]
+
+    try:
+        ins = pd.read_sql_query(
+            'SELECT ticker, as_of, insider, position, txn_type AS "transaction", '
+            "shares, value, ownership FROM insider_txns ORDER BY as_of DESC", conn)
+    except Exception:
+        ins = pd.DataFrame()
+    insiders: dict[str, list] = {}
+    if len(ins):
+        for t, g in ins.groupby("ticker"):
+            insiders[t] = [{"asOf": r.as_of, "insider": r.insider,
+                            "position": r.position, "txn": getattr(r, "transaction"),
+                            "shares": None if pd.isna(r.shares) else float(r.shares),
+                            "ownership": r.ownership}
+                           for r in g.head(INSIDER_SHOWN).itertuples()]
+    return metrics, estimates, holders, insiders
+
+
 def load(conn) -> dict:
     """Assemble the payload: one record per ticker, plus store-level totals."""
     companies = pd.read_sql_query(
-        "SELECT ticker, name, sector FROM companies", conn
+        "SELECT ticker, name, sector, subindustry FROM companies", conn
     ).set_index("ticker")
+    det_metrics, det_est, det_hold, det_ins = _detail(conn)
 
     est = pd.read_sql_query(
         "SELECT ticker, ref_period, as_of, value FROM metrics "
@@ -83,6 +154,11 @@ def load(conn) -> dict:
             "ticker": ticker,
             "name": (info["name"] if info is not None else ticker) or ticker,
             "sector": (info["sector"] if info is not None else "") or "",
+            "subindustry": (info["subindustry"] if info is not None else "") or "",
+            "metrics": det_metrics.get(ticker, []),
+            "estimates": det_est.get(ticker, []),
+            "holders": det_hold.get(ticker, []),
+            "insiders": det_ins.get(ticker, []),
             "fy0Ref": fy0_ref, "fy1Ref": fy1_ref,
             "fy0": [{"d": r.as_of, "v": round(float(r.value), 5)}
                     for r in fy0.itertuples()],
@@ -207,6 +283,25 @@ TEMPLATE = r"""<!doctype html>
   .tip .row b { font-variant-numeric:tabular-nums; }
   .tip .nm { color:var(--ink-2); display:inline-flex; align-items:center; gap:6px; }
   .note { color:var(--muted); font-size:11.5px; margin-top:10px; }
+  #dbody .tblwrap { max-height:560px; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:2px 0 16px;
+          border-bottom:1px solid var(--grid); padding-bottom:10px; }
+  .tabs button { border-color:transparent; background:transparent; color:var(--ink-2); }
+  .tabs button[aria-selected="true"] { border-color:var(--axis);
+          background:var(--plane); color:var(--ink); font-weight:600; }
+  .mgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+           gap:10px; }
+  .mcell { border:1px solid var(--border); border-radius:8px; padding:9px 11px; }
+  .mcell .mk { color:var(--ink-2); font-size:11.5px; }
+  .mcell .mv { font-size:17px; font-weight:600; margin-top:1px;
+               font-variant-numeric:tabular-nums; }
+  .meter { height:4px; border-radius:2px; background:var(--grid); margin-top:7px;
+           overflow:hidden; }
+  .meter i { display:block; height:100%; background:var(--s1); border-radius:2px; }
+  .mcell .mp { color:var(--muted); font-size:10.5px; margin-top:4px; }
+  .up { color:var(--pos); } .dn { color:var(--neg); }
+  .swatch { width:9px; height:9px; border-radius:2px; display:inline-block;
+            margin-right:6px; vertical-align:middle; }
   .hit { fill:transparent; cursor:pointer; }
   :focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
 </style>
@@ -277,6 +372,18 @@ TEMPLATE = r"""<!doctype html>
     <div class="plot" id="c3"></div>
     <div class="tblwrap" id="tb3" hidden></div>
     <p class="note" id="n3"></p>
+  </section>
+
+  <section class="card" id="drill">
+    <div class="card-head">
+      <div>
+        <h2 id="dtitle"></h2>
+        <p class="desc" id="dsub"></p>
+      </div>
+    </div>
+    <div class="tabs" id="dtabs"></div>
+    <div id="dbody"></div>
+    <p class="note" id="dnote"></p>
   </section>
 </div>
 
@@ -598,7 +705,215 @@ for (const [b, p] of [["t1","tb1"],["t2","tb2"],["t3","tb3"]]) {
   });
 }
 
-function drawAll() { chart1(); chart2(); chart3(); }
+/* ---------- drilldown ---------- */
+const METRIC_LABEL = {
+  price:"Price", marketCap:"Market cap", forwardPE:"Forward P/E",
+  trailingPE:"Trailing P/E", evEbitda:"EV/EBITDA", ps:"P/S", fcfYield:"FCF yield",
+  revGrowth:"Revenue growth", epsGrowth:"EPS growth", grossMargin:"Gross margin",
+  opMargin:"Operating margin", netMargin:"Net margin", roe:"ROE",
+  netDebtEbitda:"Net debt / EBITDA", fcf:"Free cash flow", cash:"Cash",
+  ret1m:"1-month return", ret6m:"6-month return", retYtd:"YTD return",
+};
+const MONEY = new Set(["marketCap","fcf","cash"]);
+const PCTM  = new Set(["fcfYield","revGrowth","epsGrowth","grossMargin","opMargin",
+                       "netMargin","roe","ret1m","ret6m","retYtd"]);
+const bigUSD = v => { const a = Math.abs(v);
+  if (a >= 1e12) return "$" + (v/1e12).toFixed(2) + "T";
+  if (a >= 1e9)  return "$" + (v/1e9).toFixed(1) + "B";
+  if (a >= 1e6)  return "$" + (v/1e6).toFixed(1) + "M";
+  return "$" + fmtNum(v); };
+const bigNum = v => { const a = Math.abs(v);
+  if (a >= 1e9) return (v/1e9).toFixed(2) + "B";
+  if (a >= 1e6) return (v/1e6).toFixed(1) + "M";
+  if (a >= 1e3) return (v/1e3).toFixed(1) + "K";
+  return fmtNum(v); };
+const ordinal = n => { const t = n % 100, u = n % 10;
+  if (t >= 11 && t <= 13) return n + "th";
+  return n + (u === 1 ? "st" : u === 2 ? "nd" : u === 3 ? "rd" : "th"); };
+function metricValue(m, v) {
+  if (MONEY.has(m)) return bigUSD(v);
+  if (PCTM.has(m)) return v.toFixed(1) + "%";
+  if (m === "price") return "$" + v.toFixed(2);
+  return v.toFixed(2) + "x";
+}
+
+let dtab = "details";
+const TABS = [["details","Company details"], ["holders","Top holdings"],
+              ["changes","Holding changes"], ["estimates","Estimates"],
+              ["insiders","Insider filings"]];
+
+function drill() {
+  const r = byTicker[sel];
+  document.getElementById("dtitle").textContent = `${r.ticker} — ${r.name}`;
+  document.getElementById("dsub").textContent =
+    [r.sector, r.subindustry].filter(Boolean).join(" · ");
+
+  const tabs = document.getElementById("dtabs");
+  tabs.replaceChildren(...TABS.map(([k, lbl]) => {
+    const b = document.createElement("button");
+    b.textContent = lbl; b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(k === dtab));
+    b.addEventListener("click", () => { dtab = k; drill(); });
+    return b;
+  }));
+
+  const body = document.getElementById("dbody");
+  const note = document.getElementById("dnote");
+  body.replaceChildren(); note.textContent = "";
+
+  if (dtab === "details") {
+    const grid = document.createElement("div"); grid.className = "mgrid";
+    for (const m of r.metrics) {
+      const c = document.createElement("div"); c.className = "mcell";
+      const k = document.createElement("div"); k.className = "mk";
+      k.textContent = METRIC_LABEL[m.metric] || m.metric;
+      const v = document.createElement("div"); v.className = "mv";
+      v.textContent = metricValue(m.metric, m.value);
+      c.append(k, v);
+      if (m.pct != null) {
+        const track = document.createElement("div"); track.className = "meter";
+        const fill = document.createElement("i");
+        fill.style.width = Math.round(m.pct * 100) + "%";
+        track.appendChild(fill);
+        const p = document.createElement("div"); p.className = "mp";
+        p.textContent = `${ordinal(Math.round(m.pct*100))} percentile in ${r.subindustry||"peers"}`;
+        c.append(track, p);
+      }
+      grid.appendChild(c);
+    }
+    body.appendChild(grid);
+    note.textContent = "Percentile is the rank within the company's sub-industry on "
+      + "the latest snapshot — the same peer set the dashboard scores against. "
+      + "High is not always good: for P/E or net debt a low rank is the favourable end.";
+    return;
+  }
+
+  if (dtab === "holders" || dtab === "changes") {
+    if (!r.holders.length) {
+      body.textContent = "No holder data captured for this company yet.";
+      return;
+    }
+    let rows = r.holders.slice();
+    if (dtab === "changes") {
+      rows = rows.filter(h => h.pctChange != null)
+                 .sort((a,b) => Math.abs(b.pctChange) - Math.abs(a.pctChange));
+    }
+    const wrap = document.createElement("div"); wrap.className = "tblwrap";
+    const t = document.createElement("table");
+    const head = ["Holder", "Type", "Reported", "% held", "Shares", "Value", "QoQ change"];
+    const thead = document.createElement("thead"), htr = document.createElement("tr");
+    for (const h of head) { const th = document.createElement("th");
+      th.textContent = h; htr.appendChild(th); }
+    thead.appendChild(htr); t.appendChild(thead);
+    const tb = document.createElement("tbody");
+    for (const h of rows) {
+      const tr = document.createElement("tr");
+      const cells = [
+        h.holder,
+        h.kind === "institution" ? "13F" : "Fund",
+        h.asOf,
+        h.pctHeld == null ? "—" : (h.pctHeld*100).toFixed(2) + "%",
+        h.shares == null ? "—" : bigNum(h.shares),
+        h.value == null ? "—" : bigUSD(h.value),
+        null,
+      ];
+      cells.forEach((c, i) => {
+        const td = document.createElement("td");
+        if (i === 6) {
+          if (h.pctChange == null) td.textContent = "—";
+          else { td.textContent = fmtPct(h.pctChange*100);
+                 td.className = h.pctChange >= 0 ? "up" : "dn"; }
+        } else td.textContent = c;
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb); wrap.appendChild(t); body.appendChild(wrap);
+    const dates = [...new Set(r.holders.map(h => h.asOf))].sort();
+    note.textContent =
+      "These are the ten largest institutional holders and the ten largest fund "
+      + "holders that the data source exposes — not the whole 13F universe, which "
+      + "runs to thousands of filers. A fund that tripled a small position will not "
+      + "appear here, so read this as changes among the largest holders rather than "
+      + "the largest changes. Report dates in this list: " + dates.join(", ")
+      + " — the source mixes quarters, so each row is dated by its own filing.";
+    return;
+  }
+
+  if (dtab === "estimates") {
+    if (!r.estimates.length) { body.textContent = "No estimates captured."; return; }
+    const refs = [...new Set(r.estimates.map(e => e.ref))].sort((a,b) =>
+      (a[1] === b[1] ? 0 : a[1] === "Q" ? -1 : 1) || (a < b ? -1 : 1));
+    const byRef = {};
+    for (const e of r.estimates) (byRef[e.ref] ||= {})[e.metric] = e.value;
+    const spec = [
+      ["epsEstAvg", "EPS consensus", v => v.toFixed(2)],
+      ["epsEstLow", "EPS low", v => v.toFixed(2)],
+      ["epsEstHigh", "EPS high", v => v.toFixed(2)],
+      ["epsEstAnalysts", "EPS analysts", v => String(v)],
+      ["epsEstGrowth", "EPS growth", v => fmtPct(v*100)],
+      ["revEstAvg", "Revenue consensus", bigUSD],
+      ["revEstGrowth", "Revenue growth", v => fmtPct(v*100)],
+      ["revEstAnalysts", "Revenue analysts", v => String(v)],
+      ["epsRevUp7", "Raised, last 7d", v => String(v)],
+      ["epsRevDown7", "Cut, last 7d", v => String(v)],
+      ["epsRevUp30", "Raised, last 30d", v => String(v)],
+      ["epsRevDown30", "Cut, last 30d", v => String(v)],
+    ];
+    const wrap = document.createElement("div"); wrap.className = "tblwrap";
+    const t = document.createElement("table");
+    const thead = document.createElement("thead"), htr = document.createElement("tr");
+    for (const h of ["", ...refs]) { const th = document.createElement("th");
+      th.textContent = h; htr.appendChild(th); }
+    thead.appendChild(htr); t.appendChild(thead);
+    const tb = document.createElement("tbody");
+    for (const [key, label, fmt] of spec) {
+      if (!refs.some(rf => byRef[rf] && byRef[rf][key] != null)) continue;
+      const tr = document.createElement("tr");
+      const th = document.createElement("td"); th.textContent = label; tr.appendChild(th);
+      for (const rf of refs) {
+        const td = document.createElement("td");
+        const v = byRef[rf] ? byRef[rf][key] : null;
+        td.textContent = v == null ? "—" : fmt(v);
+        tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb); wrap.appendChild(t); body.appendChild(wrap);
+    note.textContent = "FQ is a fiscal quarter, FY a fiscal year, each labelled by "
+      + "the period it ends. Both are captured because a company's fiscal year and "
+      + "one of its quarters can end on the same day.";
+    return;
+  }
+
+  if (dtab === "insiders") {
+    if (!r.insiders.length) {
+      body.textContent = "No insider filings captured for this company.";
+      return;
+    }
+    const wrap = document.createElement("div"); wrap.className = "tblwrap";
+    const t = document.createElement("table");
+    const thead = document.createElement("thead"), htr = document.createElement("tr");
+    for (const h of ["Date","Insider","Position","Transaction","Shares","Held"]) {
+      const th = document.createElement("th"); th.textContent = h; htr.appendChild(th); }
+    thead.appendChild(htr); t.appendChild(thead);
+    const tb = document.createElement("tbody");
+    for (const x of r.insiders) {
+      const tr = document.createElement("tr");
+      for (const c of [x.asOf, x.insider, x.position, x.txn,
+                       x.shares == null ? "—" : bigNum(x.shares),
+                       x.ownership === "D" ? "Direct" : x.ownership === "I" ? "Indirect" : x.ownership]) {
+        const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb); wrap.appendChild(t); body.appendChild(wrap);
+    note.textContent = `The ${r.insiders.length} most recent filings captured. `
+      + "Grants and gifts are not open-market buying — read the transaction column, "
+      + "not just the share count.";
+  }
+}
+
+function drawAll() { chart1(); chart2(); chart3(); drill(); }
 drawAll();
 let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawAll, 150); });
 </script>

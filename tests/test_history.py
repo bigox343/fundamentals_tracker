@@ -463,3 +463,65 @@ def test_finish_run_closes_it(conn):
 
 def test_run_ids_are_unique(conn):
     assert history.start_run(conn) != history.start_run(conn)
+
+
+# --------------------------------------------------------------------------- #
+# ownership                                                                    #
+# --------------------------------------------------------------------------- #
+
+def _holds():
+    return [
+        history.HoldingRow("NVDA", "2026-06-30", "institution", "Blackrock Inc.",
+                           1941918386, 437242350903, 0.0802, 0.0085),
+        history.HoldingRow("NVDA", "2026-03-31", "institution", "FMR, LLC",
+                           1026051548, 231025770305, 0.0424, 0.0324),
+        history.HoldingRow("NVDA", "2026-06-30", "fund", "Blackrock Inc.",
+                           10, 20, 0.001, 0.5),
+    ]
+
+
+def test_upsert_holdings_writes_and_is_idempotent(conn):
+    assert history.upsert_holdings(conn, _holds()) == 3
+    history.upsert_holdings(conn, _holds())
+    n = conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0]
+    assert n == 3
+
+
+def test_a_holder_can_appear_in_both_lists(conn):
+    """Blackrock is in the 13F list and the fund list; kind keeps them apart."""
+    history.upsert_holdings(conn, _holds())
+    got = history.holdings(conn, "NVDA")
+    assert len(got[got.holder == "Blackrock Inc."]) == 2
+
+
+def test_holdings_keep_both_report_quarters(conn):
+    """A frame mixes quarters, so one holder's date must not overwrite another's."""
+    history.upsert_holdings(conn, _holds())
+    got = history.holdings(conn, "NVDA", kind="institution")
+    assert set(got.as_of) == {"2026-06-30", "2026-03-31"}
+
+
+def test_holdings_tolerate_a_missing_number(conn):
+    """A position is meaningful even when one of its four numbers is absent."""
+    history.upsert_holdings(conn, [
+        history.HoldingRow("NVDA", "2026-06-30", "institution", "X",
+                           100, None, 0.01, float("nan")),
+    ])
+    got = history.holdings(conn, "NVDA")
+    assert len(got) == 1
+    assert pd.isna(got.iloc[0]["value"])
+    assert pd.isna(got.iloc[0]["pct_change"])
+
+
+def test_upsert_insiders_and_read_back(conn):
+    rows = [
+        history.InsiderRow("NVDA", "2026-08-10", "A B", "Director",
+                           "Stock Award(Grant)", 2410, 0, "D"),
+        history.InsiderRow("NVDA", "2026-08-05", "C D", "Director",
+                           "Stock Gift", 500000, 0, "I"),
+    ]
+    assert history.upsert_insiders(conn, rows) == 2
+    history.upsert_insiders(conn, rows)
+    got = history.insiders(conn, "NVDA")
+    assert len(got) == 2
+    assert list(got.as_of) == ["2026-08-10", "2026-08-05"]
