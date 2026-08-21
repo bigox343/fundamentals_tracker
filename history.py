@@ -673,6 +673,25 @@ def ingested_filings(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
     }
 
 
+def seen_filings(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every (cik, quarter) looked at, whatever the outcome.
+
+    Distinct from `ingested_filings`, which reports only successful ones. A
+    manager that simply did not file for a quarter is *settled*, not missing:
+    counting it as missing would make the fetch sweep EDGAR on every run
+    forever, since the absent filing never arrives.
+    """
+    return {(cik, q) for cik, q in conn.execute(
+        "SELECT cik, quarter FROM thirteenf_filings")}
+
+
+def last_sweep(conn: sqlite3.Connection) -> str | None:
+    """When EDGAR was last asked, as an ISO timestamp."""
+    row = conn.execute(
+        "SELECT MAX(ingested_at) FROM thirteenf_filings").fetchone()
+    return row[0] if row and row[0] else None
+
+
 def thirteenf_quarters(conn: sqlite3.Connection) -> list[str]:
     """Quarters with at least one ingested filing, newest first."""
     return [r[0] for r in conn.execute(

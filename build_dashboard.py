@@ -157,6 +157,14 @@ COHORTS: dict[str, str] = {f["name"]: f["cohort"] for f in FUNDS}
 # building a position from one round-tripping it, which a single delta cannot.
 THIRTEENF_QUARTERS = 8
 
+# How stale the 13F sweep may get before EDGAR is asked again. A new quarter is
+# still picked up the day its deadline passes, because that quarter has no rows
+# at all and forces a sweep regardless. This interval governs only re-checks:
+# amendments, which restate a quarter under a new accession, and managers who
+# file late. Weekly keeps the steady state near zero requests without letting a
+# restatement sit unnoticed for a quarter.
+THIRTEENF_RECHECK_DAYS = 7
+
 CUSIP_MAP_PATH = DATA_DIR / "cusip_map.csv"
 
 
@@ -1320,16 +1328,25 @@ def fetch_13f(force: bool = False) -> None:
         print(f"13F skipped, store unavailable: {exc}")
         return
 
-    missing = sum(1 for f in FUNDS for q in quarters
-                  if (f["cik"], q) not in already)
-    if not missing:
-        print(f"13F current: {len(FUNDS)} funds x {len(quarters)} quarters.")
-        conn.close()
-        return
+    seen = history.seen_filings(conn)
+    unseen = [(f, q) for f in FUNDS for q in quarters if (f["cik"], q) not in seen]
 
-    print(f"Fetching 13F filings ({missing} missing of "
+    if not unseen and not force:
+        # Nothing new is possible today, so only the periodic re-check applies.
+        stamp = history.last_sweep(conn)
+        if stamp:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(stamp)).days
+            if age < THIRTEENF_RECHECK_DAYS:
+                print(f"13F current: {len(FUNDS)} funds x {len(quarters)} "
+                      f"quarters, last checked {age}d ago.")
+                conn.close()
+                return
+
+    missing = len(unseen)
+    print(f"Fetching 13F filings ({missing} unseen of "
           f"{len(FUNDS) * len(quarters)})...")
-    rows, filings, raw, stale, failed = edgar.collect_13f(
+    rows, filings, raw, stale, failed, drift = edgar.collect_13f(
         FUNDS, quarters, cusip_map, already)
 
     by_quarter: dict[str, list[dict]] = {}
@@ -1339,6 +1356,7 @@ def fetch_13f(force: bool = False) -> None:
         year, month, _ = quarter.split("-")
         tag = f"{year}Q{(int(month) - 1) // 3 + 1}"
         edgar.write_raw_archive(records, DATA_DIR / f"13f_{tag}.csv.gz")
+    edgar.write_filings_manifest(filings, DATA_DIR / edgar.FILINGS_MANIFEST)
 
     try:
         for filing in filings:
@@ -1359,6 +1377,10 @@ def fetch_13f(force: bool = False) -> None:
         print(f"  STALE CIK -- {line}")
     if failed:
         print(f"  13F fetch failed for: {', '.join(failed)}")
+    for n_filers, cusip, issuer in drift[:5]:
+        if n_filers >= 5:
+            print(f"  UNMAPPED CUSIP -- {cusip} {issuer!r} held by {n_filers} "
+                  f"managers; rebuild with tools/build_cusip_map.py")
 
 
 def rebuild_13f() -> int:
@@ -1371,7 +1393,8 @@ def rebuild_13f() -> int:
     if not paths:
         print("No 13f_*.csv.gz archives found")
         return 1
-    rows, filings = edgar.ingest_archives(paths, cusip_map)
+    rows, filings = edgar.ingest_archives(
+        paths, cusip_map, DATA_DIR / edgar.FILINGS_MANIFEST)
     conn = history.connect()
     history.ensure_schema(conn)
     conn.execute("DELETE FROM thirteenf")

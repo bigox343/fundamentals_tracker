@@ -283,6 +283,7 @@ def collect_13f(funds: Sequence[dict], quarters: Sequence[str],
     raw: list[dict] = []
     stale: list[str] = []
     failed: list[str] = []
+    unmapped: dict[str, tuple[str, set[str]]] = {}
 
     for i, fund in enumerate(funds, 1):
         cik, name = fund["cik"], fund["name"]
@@ -305,6 +306,13 @@ def collect_13f(funds: Sequence[dict], quarters: Sequence[str],
             if quarter in wanted and quarter not in newest:
                 newest[quarter] = (filed, accession, _form)
 
+        for quarter in sorted(wanted - set(newest)):
+            # Viking Global filed nothing for Q1 2026 and Pershing Square
+            # nothing for Q2. Without a marker these count as missing on every
+            # subsequent run, and the fetch can never reach a quiet state.
+            filings.append(FilingRow(cik, name, cohort, quarter, "", "",
+                                     0, 0, 0.0, "no-filing"))
+
         fetched = skipped = 0
         for quarter, (filed, accession, _form) in sorted(newest.items(),
                                                          reverse=True):
@@ -321,6 +329,11 @@ def collect_13f(funds: Sequence[dict], quarters: Sequence[str],
                                          filed, n_equity, len(positions), book,
                                          "ok"))
                 for rec in records:
+                    cusip = (rec.get("cusip") or "").strip()
+                    if is_equity_line(rec) and cusip not in cusip_map:
+                        issuer, seen = unmapped.setdefault(
+                            cusip, (_squeeze(rec.get("nameOfIssuer", "")), set()))
+                        seen.add(cik)
                     raw.append({"cik": cik, "fund": name, "cohort": cohort,
                                 "quarter": quarter, "accession": accession,
                                 "filed_date": filed,
@@ -341,10 +354,58 @@ def collect_13f(funds: Sequence[dict], quarters: Sequence[str],
         print(f"  [{i:>2}/{len(funds)}] {name:<17} "
               f"{fetched} fetched, {skipped} current", flush=True)
 
-    return rows, filings, raw, stale, failed
+    # A CUSIP many managers hold but the map does not know is the signal that
+    # the map has drifted from the universe -- a new share class, or a name
+    # added to UNIVERSE without rebuilding the map.
+    drift = sorted(((len(seen), cusip, issuer)
+                    for cusip, (issuer, seen) in unmapped.items()),
+                   reverse=True)
+    return rows, filings, raw, stale, failed, drift
 
 
-def ingest_archives(paths: Sequence[Path], cusip_map: dict[str, str]):
+FILINGS_MANIFEST = "13f_filings.csv.gz"
+
+
+def read_filings_manifest(path: Path) -> list[FilingRow]:
+    """Load the manifest of every filing ever looked at."""
+    if not Path(path).exists():
+        return []
+    frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+    out: list[FilingRow] = []
+    for rec in frame.to_dict("records"):
+        out.append(FilingRow(
+            rec["cik"], rec["fund"], rec.get("cohort", ""), rec["quarter"],
+            rec.get("accession", ""), rec.get("filed_date", ""),
+            int(rec.get("n_positions") or 0), int(rec.get("n_universe") or 0),
+            float(rec.get("book_value") or 0.0), rec.get("status", "ok")))
+    return out
+
+
+def write_filings_manifest(rows: Iterable[FilingRow], path: Path) -> int:
+    """Merge new filing records into the manifest, keyed by (cik, quarter).
+
+    The position archives cannot stand alone as the record of truth, because a
+    filing with no reportable positions leaves no rows in them -- Viking Global
+    filed an empty information table for Q1 2026. Rebuilt from positions only,
+    the store would forget that filing happened, and every position Viking held
+    the quarter before would render as an exit it never made. The manifest is
+    what keeps an absent position distinguishable from an absent filing across
+    a rebuild.
+    """
+    merged: dict[tuple[str, str], FilingRow] = {
+        (r.cik, r.quarter): r for r in read_filings_manifest(path)}
+    for row in rows:
+        merged[(row.cik, row.quarter)] = row
+    frame = pd.DataFrame([r._asdict() for r in merged.values()])
+    if not len(frame):
+        return 0
+    frame = frame.sort_values(["fund", "quarter"])
+    frame.to_csv(path, index=False, compression="gzip")
+    return len(frame)
+
+
+def ingest_archives(paths: Sequence[Path], cusip_map: dict[str, str],
+                    manifest: Path | None = None):
     """Rebuild store rows from the raw archives, with no network.
 
     This is what makes the archive worth keeping. Adding a 149th ticker, or
@@ -353,6 +414,10 @@ def ingest_archives(paths: Sequence[Path], cusip_map: dict[str, str]):
     the rest of the store.
     """
     rows: list[ThirteenFRow] = []
+    # The manifest is authoritative for which filings exist, including the ones
+    # that reported nothing and so appear nowhere in the position archives.
+    from_manifest = {(r.cik, r.quarter): r
+                     for r in (read_filings_manifest(manifest) if manifest else [])}
     filings: list[FilingRow] = []
     for path in sorted(paths):
         frame = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -369,10 +434,12 @@ def ingest_archives(paths: Sequence[Path], cusip_map: dict[str, str]):
                  for r in records],
                 cusip_map)
             rows.extend(positions)
-            filings.append(FilingRow(
-                cik, name, first.get("cohort", ""), quarter,
-                first.get("accession", ""), first.get("filed_date", ""),
-                n_equity, len(positions), book, "ok"))
+            if (cik, quarter) not in from_manifest:
+                from_manifest[(cik, quarter)] = FilingRow(
+                    cik, name, first.get("cohort", ""), quarter,
+                    first.get("accession", ""), first.get("filed_date", ""),
+                    n_equity, len(positions), book, "ok")
+    filings = list(from_manifest.values())
     return rows, filings
 
 

@@ -43,7 +43,7 @@ Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock 
 python -m pytest tests/ -q
 ```
 
-152 tests, no network. Every parsing function is exercised against captured
+160 tests, no network. Every parsing function is exercised against captured
 fixtures in [tests/fixtures/](tests/fixtures/), which is why `extract.py` and
 `edgar.py` both keep their network-touching helpers confined to the bottom of
 the module.
@@ -61,7 +61,8 @@ run_daily.sh
         ├── extract.collect_estimates()
         │     └── data/estimates_YYYYMMDD.csv.gz     (written, never pruned)
         ├── fetch_13f()            quarterly; usually makes no request at all
-        │     └── data/13f_YYYYQN.csv.gz             (written, never pruned)
+        │     ├── data/13f_YYYYQN.csv.gz             (written, never pruned)
+        │     └── data/13f_filings.csv.gz            (manifest of every filing)
         ├── fetch_closes(period=5y)
         ├── record_history()  ──►  data/history.db
         └── render_html()     ──►  dashboard.html
@@ -189,6 +190,26 @@ Each was found against live filings, not reasoned about in advance:
 | Nearly half of a multi-strat's lines are options (Citadel 47%) | Positions overstated roughly 2x |
 | Convertible-bond CUSIPs match the issuer name | A fund's SNOW convert counts as SNOW equity |
 | Share counts are as-filed; stored closes are back-adjusted | A 25:1 split renders as the manager **adding 2,400%** |
+
+### Cadence, and how it stays quiet
+
+`fetch_13f()` runs inside the normal daily run and almost always makes **no
+network request at all**. A quarter enters the window the day its 45-day
+deadline passes, which forces a sweep because that quarter has no rows yet;
+otherwise EDGAR is re-checked only every `THIRTEENF_RECHECK_DAYS` (7), which is
+what catches amendments and late filers. `run_daily.sh` then re-renders
+`history.html`, since the 13F views are built from the store rather than the
+fetch and would otherwise never show a new quarter.
+
+Two records make the quiet state reachable. A manager that simply did not file
+for a quarter is recorded as `no-filing`, so it counts as settled rather than
+missing forever — without it, Viking Global's absent Q1 and Pershing Square's
+absent Q2 would trigger a full sweep every single day. And
+`data/13f_filings.csv.gz` is a manifest of every filing ever looked at, because
+the position archives cannot carry a filing that reported **no positions**:
+Viking's Q1 2026 information table was empty, and rebuilt from positions alone
+the store would forget it filed and turn its 15 prior holdings into exits that
+never happened.
 
 ### The CUSIP map
 

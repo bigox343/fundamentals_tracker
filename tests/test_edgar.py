@@ -172,3 +172,77 @@ def test_an_empty_cusip_map_stores_nothing_but_still_measures_the_book():
         "0001", "Fund", "2026-06-30", records, {})
     assert rows == []
     assert n_equity > 0 and book > 0
+
+
+# --------------------------------------------------------------------------
+# The filings manifest
+# --------------------------------------------------------------------------
+
+def _filing(cik="1", quarter="2026-06-30", n=5, status="ok"):
+    from history import FilingRow
+    return FilingRow(cik, "Fund", "Tiger", quarter, f"acc-{cik}-{quarter}",
+                     "2026-08-14", n, n, 1000.0, status)
+
+
+def test_manifest_round_trips(tmp_path):
+    path = tmp_path / "13f_filings.csv.gz"
+    edgar.write_filings_manifest([_filing()], path)
+    assert edgar.read_filings_manifest(path) == [_filing()]
+
+
+def test_manifest_merges_rather_than_replacing(tmp_path):
+    """Each run fetches only some quarters; the manifest is cumulative."""
+    path = tmp_path / "13f_filings.csv.gz"
+    edgar.write_filings_manifest([_filing(quarter="2026-03-31")], path)
+    edgar.write_filings_manifest([_filing(quarter="2026-06-30")], path)
+    assert {r.quarter for r in edgar.read_filings_manifest(path)} == {
+        "2026-03-31", "2026-06-30"}
+
+
+def test_manifest_updates_a_restated_quarter_in_place(tmp_path):
+    path = tmp_path / "13f_filings.csv.gz"
+    edgar.write_filings_manifest([_filing(n=5)], path)
+    edgar.write_filings_manifest([_filing(n=9)], path)
+    rows = edgar.read_filings_manifest(path)
+    assert len(rows) == 1 and rows[0].n_positions == 9
+
+
+def test_a_filing_with_no_positions_survives_a_rebuild(tmp_path):
+    """The defect the manifest exists to fix.
+
+    Viking Global's Q1 2026 information table was empty, so it leaves no rows
+    in the position archives. Rebuilt from those alone, the store forgets the
+    filing happened -- and every position held the quarter before renders as an
+    exit that never occurred.
+    """
+    import pandas as pd
+    archive = tmp_path / "13f_2026Q1.csv.gz"
+    pd.DataFrame([{"cik": "2", "fund": "Other", "cohort": "Tiger",
+                   "quarter": "2026-03-31", "accession": "acc-2",
+                   "filed_date": "2026-05-15", "cusip": "007903107",
+                   "issuer": "AMD", "title_class": "COM", "shares": "10",
+                   "share_type": "SH", "value": "1000", "put_call": ""}]
+                 ).to_csv(archive, index=False, compression="gzip")
+    manifest = tmp_path / "13f_filings.csv.gz"
+    edgar.write_filings_manifest(
+        [_filing(cik="1", quarter="2026-03-31", n=0)], manifest)
+
+    _rows, filings = edgar.ingest_archives(
+        [archive], {"007903107": "AMD"}, manifest)
+
+    assert ("1", "2026-03-31") in {(f.cik, f.quarter) for f in filings}
+    assert ("2", "2026-03-31") in {(f.cik, f.quarter) for f in filings}
+
+
+def test_ingest_without_a_manifest_still_works(tmp_path):
+    """Archives written before the manifest existed must remain ingestible."""
+    import pandas as pd
+    archive = tmp_path / "13f_2026Q1.csv.gz"
+    pd.DataFrame([{"cik": "2", "fund": "Other", "cohort": "Tiger",
+                   "quarter": "2026-03-31", "accession": "acc-2",
+                   "filed_date": "2026-05-15", "cusip": "007903107",
+                   "issuer": "AMD", "title_class": "COM", "shares": "10",
+                   "share_type": "SH", "value": "1000", "put_call": ""}]
+                 ).to_csv(archive, index=False, compression="gzip")
+    rows, filings = edgar.ingest_archives([archive], {"007903107": "AMD"})
+    assert len(rows) == 1 and len(filings) == 1

@@ -171,6 +171,24 @@ because amendments restate rather than supplement.
 
 First run backfills 8 quarters × 27 funds ≈ 216 filings at ~0.25s spacing.
 
+**Amended during implementation.** Two things were needed to actually reach the
+quiet state this section claims:
+
+*A filing that does not exist must be recorded.* Viking Global filed nothing for
+Q1 2026 and Pershing Square nothing for Q2. Counted as missing, they force a
+sweep of all 27 funds on every run forever, since the absent filing never
+arrives. They are now stored with status `no-filing` and count as settled. The
+periodic re-check that catches amendments is bounded to
+`THIRTEENF_RECHECK_DAYS`.
+
+*The position archives are not a sufficient record of truth.* A filing that
+reports no positions leaves no rows in them — Viking's Q1 2026 information table
+was empty. Rebuilt from positions alone, the store forgets the filing happened,
+and §4.1's invariant collapses: Viking's 15 prior holdings render as exits it
+never made. `data/13f_filings.csv.gz` carries one row per filing looked at,
+whatever the outcome, and `--rebuild-13f` reads it in preference to inferring
+filings from positions.
+
 ---
 
 ## 7. Rendering

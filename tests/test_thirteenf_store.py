@@ -183,3 +183,34 @@ def test_ingested_filings_reports_accessions_for_skipping(conn):
 def test_a_failed_filing_is_not_reported_as_ingested(conn):
     _filed(conn, "1", Q2, status="failed")
     assert history.ingested_filings(conn) == {}
+
+
+# --------------------------------------------------------------------------
+# Reaching a quiet steady state
+# --------------------------------------------------------------------------
+
+def test_a_filing_that_does_not_exist_is_recorded_so_it_stops_being_missing(conn):
+    """Viking Global filed nothing for Q1 2026, Pershing Square nothing for Q2.
+
+    Counted as missing, they would force a sweep of EDGAR on every run forever,
+    because the absent filing never arrives.
+    """
+    history.upsert_filings(conn, [FilingRow(
+        "1", "Fund1", "Tiger", Q2, "", "", 0, 0, 0.0, "no-filing")])
+
+    assert history.ingested_filings(conn) == {}       # not a success
+    assert ("1", Q2) in history.seen_filings(conn)    # but it is settled
+
+
+def test_seen_filings_covers_every_outcome(conn):
+    _filed(conn, "1", Q2)
+    history.upsert_filings(conn, [
+        FilingRow("2", "F2", "Tiger", Q2, "", "", 0, 0, 0.0, "no-filing"),
+        FilingRow("3", "F3", "Tiger", Q2, "a", "", 0, 0, 0.0, "failed")])
+    assert history.seen_filings(conn) == {("1", Q2), ("2", Q2), ("3", Q2)}
+
+
+def test_last_sweep_reports_when_edgar_was_asked(conn):
+    assert history.last_sweep(conn) is None
+    _filed(conn, "1", Q2)
+    assert history.last_sweep(conn) is not None
