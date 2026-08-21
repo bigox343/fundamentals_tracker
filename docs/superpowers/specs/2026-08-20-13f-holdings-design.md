@@ -228,10 +228,12 @@ derived from them and therefore disposable." The 45 MB SQLite file would become
 the sole copy of the perishable estimates history, which is the one dataset here
 that genuinely cannot be refetched.
 
-These files compress 6–9x (estimates 8.8x, insiders 6.3x), so:
+These files compress 5.9x blended (estimates 8.8x, insiders 6.3x, holdings
+4.1x, fundamentals only 2.2x), so:
 `write_rows_csv`/`read_rows_csv` move to `.csv.gz`, reads fall back to plain
 `.csv` so existing files keep working, and existing files are compressed once.
-**433 → 54 MB/yr with nothing lost.**
+**433 → 73 MB/yr with nothing lost**, measured after migrating the
+existing files rather than extrapolated from the best-compressing one.
 
 `float_precision="round_trip"` is preserved through the change — that invariant
 is the reason a rebuilt store equals the one it replaced. Acceptance test:

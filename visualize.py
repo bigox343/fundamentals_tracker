@@ -102,12 +102,86 @@ def _detail(conn) -> tuple[dict, dict, dict, dict]:
     return metrics, estimates, holders, insiders
 
 
+def _thirteenf(conn) -> tuple[dict, dict]:
+    """13F positions per company, and the fund-first view of the same rows.
+
+    Returns (per_ticker, fundview). Both are built from one pass over the two
+    newest ingested quarters, because every number a reader wants here is a
+    comparison between them.
+    """
+    try:
+        quarters = history.thirteenf_quarters(conn)
+    except Exception:  # noqa: BLE001 - a store predating this table
+        return {}, {}
+    if not quarters:
+        return {}, {}
+    quarter = quarters[0]
+    prev = quarters[1] if len(quarters) > 1 else None
+
+    try:
+        changes = history.thirteenf_changes(conn, quarter, prev)
+    except Exception:  # noqa: BLE001
+        return {}, {}
+    if not len(changes):
+        return {}, {}
+
+    meta = pd.read_sql_query(
+        "SELECT cik, fund, cohort, book_value, n_positions, n_universe "
+        "FROM thirteenf_filings WHERE quarter = ? AND status = 'ok'",
+        conn, params=[quarter]).set_index("cik")
+
+    def _f(value):
+        return None if value is None or pd.isna(value) else float(value)
+
+    per_ticker: dict[str, list] = {}
+    for ticker, group in changes.groupby("ticker"):
+        rows = []
+        for r in group.itertuples():
+            info = meta.loc[r.cik] if r.cik in meta.index else None
+            rows.append({
+                "fund": r.fund,
+                "cohort": (info["cohort"] if info is not None else "") or "",
+                "shares": _f(r.shares), "value": _f(r.value),
+                "prevShares": _f(r.prev_shares),
+                "deltaShares": _f(r.delta_shares), "deltaPct": _f(r.delta_pct),
+                "pctOfBook": _f(r.pct_of_book), "action": r.action,
+            })
+        rows.sort(key=lambda x: (x["value"] or 0), reverse=True)
+        per_ticker[ticker] = rows
+
+    funds: list[dict] = []
+    for cik, group in changes.groupby("cik"):
+        info = meta.loc[cik] if cik in meta.index else None
+        if info is None:
+            continue
+        held = group[group["shares"] > 0]
+        positions = []
+        for r in group.sort_values("value", ascending=False).itertuples():
+            positions.append({
+                "ticker": r.ticker, "shares": _f(r.shares), "value": _f(r.value),
+                "deltaShares": _f(r.delta_shares), "deltaPct": _f(r.delta_pct),
+                "pctOfBook": _f(r.pct_of_book), "action": r.action,
+            })
+        funds.append({
+            "fund": info["fund"], "cohort": info["cohort"] or "",
+            "bookValue": _f(info["book_value"]),
+            "nFiled": int(info["n_positions"] or 0),
+            "nUniverse": int(len(held)),
+            "universeValue": float(held["value"].sum()),
+            "positions": positions,
+        })
+    funds.sort(key=lambda f: f["universeValue"], reverse=True)
+
+    return per_ticker, {"quarter": quarter, "prevQuarter": prev, "funds": funds}
+
+
 def load(conn) -> dict:
     """Assemble the payload: one record per ticker, plus store-level totals."""
     companies = pd.read_sql_query(
         "SELECT ticker, name, sector, subindustry FROM companies", conn
     ).set_index("ticker")
     det_metrics, det_est, det_hold, det_ins = _detail(conn)
+    det_13f, fundview = _thirteenf(conn)
 
     est = pd.read_sql_query(
         "SELECT ticker, ref_period, as_of, value FROM metrics "
@@ -159,6 +233,7 @@ def load(conn) -> dict:
             "estimates": det_est.get(ticker, []),
             "holders": det_hold.get(ticker, []),
             "insiders": det_ins.get(ticker, []),
+            "funds13f": det_13f.get(ticker, []),
             "fy0Ref": fy0_ref, "fy1Ref": fy1_ref,
             "fy0": [{"d": r.as_of, "v": round(float(r.value), 5)}
                     for r in fy0.itertuples()],
@@ -179,7 +254,7 @@ def load(conn) -> dict:
         "priceLast": str(cov[cov.period_type == "daily"].last_as_of.max()),
     }
     return {"dates": dates, "records": records, "totals": totals,
-            "palette": PALETTE}
+            "fundview": fundview, "palette": PALETTE}
 
 
 def render(payload: dict) -> str:
@@ -384,6 +459,19 @@ TEMPLATE = r"""<!doctype html>
     <div class="tabs" id="dtabs"></div>
     <div id="dbody"></div>
     <p class="note" id="dnote"></p>
+  </section>
+
+  <section class="card" id="fundcard">
+    <div class="chead">
+      <div>
+        <h2>Hedge fund book</h2>
+        <p class="desc" id="fdesc"></p>
+      </div>
+      <select id="fsel"></select>
+    </div>
+    <div class="kpis" id="fkpis"></div>
+    <div id="fbody"></div>
+    <p class="note" id="fnote"></p>
   </section>
 </div>
 
@@ -738,9 +826,9 @@ function metricValue(m, v) {
 }
 
 let dtab = "details";
-const TABS = [["details","Company details"], ["holders","Top holdings"],
-              ["changes","Holding changes"], ["estimates","Estimates"],
-              ["insiders","Insider filings"]];
+const TABS = [["details","Company details"], ["hedge","Hedge funds (13F)"],
+              ["holders","Top holdings"], ["changes","Holding changes"],
+              ["estimates","Estimates"], ["insiders","Insider filings"]];
 
 function drill() {
   const r = byTicker[sel];
@@ -785,6 +873,83 @@ function drill() {
     note.textContent = "Percentile is the rank within the company's sub-industry on "
       + "the latest snapshot — the same peer set the dashboard scores against. "
       + "High is not always good: for P/E or net debt a low rank is the favourable end.";
+    return;
+  }
+
+  if (dtab === "hedge") {
+    const fv = DATA.fundview || {};
+    if (!r.funds13f || !r.funds13f.length) {
+      body.textContent = fv.quarter
+        ? `None of the ${(fv.funds||[]).length} funds tracked reported a position in `
+          + `${r.ticker} for ${fv.quarter}.`
+        : "No 13F filings ingested yet.";
+      return;
+    }
+    const held = r.funds13f.filter(f => f.shares > 0);
+    const net = r.funds13f.reduce((a, f) => a + (f.deltaShares || 0), 0);
+
+    const sum = document.createElement("div"); sum.className = "mgrid";
+    const stat = (k, v, cls) => {
+      const c = document.createElement("div"); c.className = "mcell";
+      const kk = document.createElement("div"); kk.className = "mk"; kk.textContent = k;
+      const vv = document.createElement("div"); vv.className = "mv " + (cls || "");
+      vv.textContent = v; c.append(kk, vv); return c;
+    };
+    sum.append(
+      stat("Funds holding", `${held.length} of ${(fv.funds||[]).length}`),
+      stat("Combined value", bigUSD(held.reduce((a,f)=>a+(f.value||0),0))),
+      stat("Net QoQ shares", (net >= 0 ? "+" : "") + bigNum(net),
+           net > 0 ? "up" : net < 0 ? "dn" : ""),
+      stat("Quarter", fv.quarter || "—"));
+    body.appendChild(sum);
+
+    const wrap = document.createElement("div"); wrap.className = "tblwrap";
+    const t = document.createElement("table");
+    const head = ["Fund", "Cohort", "Shares", "Value", "% of book",
+                  "Δ Shares", "Δ %", ""];
+    const thead = document.createElement("thead"), htr = document.createElement("tr");
+    for (const h of head) { const th = document.createElement("th");
+      th.textContent = h; htr.appendChild(th); }
+    thead.appendChild(htr); t.appendChild(thead);
+    const tb = document.createElement("tbody");
+    for (const f of r.funds13f) {
+      const tr = document.createElement("tr");
+      if (f.action === "EXIT") tr.className = "exited";
+      const tds = [
+        [f.fund, ""],
+        [f.cohort, "dim"],
+        [f.shares > 0 ? bigNum(f.shares) : "—", "num"],
+        [f.value > 0 ? bigUSD(f.value) : "—", "num"],
+        [f.pctOfBook == null ? "—" : (f.pctOfBook*100).toFixed(2) + "%", "num"],
+        [f.deltaShares == null ? "—"
+          : (f.deltaShares >= 0 ? "+" : "") + bigNum(f.deltaShares),
+         "num " + (f.deltaShares > 0 ? "up" : f.deltaShares < 0 ? "dn" : "")],
+        [f.deltaPct == null ? "—" : fmtPct(f.deltaPct*100),
+         "num " + (f.deltaPct > 0 ? "up" : f.deltaPct < 0 ? "dn" : "")],
+        [null, ""],
+      ];
+      tds.forEach(([txt, cls], i) => {
+        const td = document.createElement("td");
+        if (i === 7) {
+          if (f.action) { const b = document.createElement("span");
+            b.className = "badge b" + f.action; b.textContent = f.action;
+            td.appendChild(b); }
+        } else { td.textContent = txt; td.className = cls; }
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb); wrap.appendChild(t); body.appendChild(wrap);
+    note.textContent =
+      "Parsed from each manager's own 13F-HR filing on SEC EDGAR, not from an "
+      + "aggregate holder list — so a fund appears here at any position size. "
+      + "Δ is against " + (fv.prevQuarter || "the prior quarter") + ". "
+      + "“% of book” is the position against that manager's entire "
+      + "reported equity book, which is the column that separates conviction "
+      + "from flow: a top position at a concentrated fund runs several percent, "
+      + "while a multi-strategy book of thousands of names rarely clears 0.5% "
+      + "on anything. 13F covers long US equity only — no shorts, no swaps — "
+      + "and is filed 45 days after quarter end, so it is a lagged picture.";
     return;
   }
 
@@ -913,7 +1078,110 @@ function drill() {
   }
 }
 
-function drawAll() { chart1(); chart2(); chart3(); drill(); }
+let fsel = null;
+
+function fundView() {
+  const fv = DATA.fundview || {};
+  const funds = fv.funds || [];
+  const card = document.getElementById("fundcard");
+  if (!funds.length) { card.style.display = "none"; return; }
+  if (fsel === null) fsel = funds[0].fund;
+  const f = funds.find(x => x.fund === fsel) || funds[0];
+
+  const sel2 = document.getElementById("fsel");
+  if (!sel2.options.length) {
+    for (const x of funds) {
+      const o = document.createElement("option");
+      o.value = x.fund;
+      o.textContent = `${x.fund} — ${x.nUniverse} of ${R.length}`;
+      sel2.appendChild(o);
+    }
+    sel2.addEventListener("change", () => { fsel = sel2.value; fundView(); });
+  }
+  sel2.value = f.fund;
+
+  document.getElementById("fdesc").textContent =
+    `${f.cohort} · ${fv.quarter} · filed ${bigNum(f.nFiled)} equity positions in total`;
+
+  const kpis = document.getElementById("fkpis");
+  kpis.replaceChildren();
+  const held = f.positions.filter(p => p.shares > 0);
+  const adds = held.filter(p => p.action === "ADD" || p.action === "NEW").length;
+  const cuts = f.positions.filter(p => p.action === "TRIM" || p.action === "EXIT").length;
+  for (const [k, v] of [
+    ["Names held here", `${f.nUniverse}`],
+    ["Value in these names", bigUSD(f.universeValue)],
+    ["Whole reported book", bigUSD(f.bookValue)],
+    ["Added / trimmed", `${adds} / ${cuts}`],
+  ]) {
+    const c = document.createElement("div"); c.className = "kpi";
+    const kk = document.createElement("div"); kk.className = "k"; kk.textContent = k;
+    const vv = document.createElement("div"); vv.className = "v"; vv.textContent = v;
+    c.append(kk, vv); kpis.appendChild(c);
+  }
+
+  const body = document.getElementById("fbody");
+  body.replaceChildren();
+  const wrap = document.createElement("div"); wrap.className = "tblwrap";
+  const t = document.createElement("table");
+  const thead = document.createElement("thead"), htr = document.createElement("tr");
+  for (const h of ["Ticker", "Name", "Shares", "Value", "% of book",
+                   "Δ Shares", "Δ %", ""]) {
+    const th = document.createElement("th"); th.textContent = h; htr.appendChild(th);
+  }
+  thead.appendChild(htr); t.appendChild(thead);
+  const tb = document.createElement("tbody");
+  for (const p of f.positions) {
+    const tr = document.createElement("tr");
+    if (p.action === "EXIT") tr.className = "exited";
+    const rec = byTicker[p.ticker];
+    const cells = [
+      [p.ticker, "lnk"],
+      [rec ? rec.name : "", "dim"],
+      [p.shares > 0 ? bigNum(p.shares) : "—", "num"],
+      [p.value > 0 ? bigUSD(p.value) : "—", "num"],
+      [p.pctOfBook == null ? "—" : (p.pctOfBook * 100).toFixed(2) + "%", "num"],
+      [p.deltaShares == null ? "—"
+        : (p.deltaShares >= 0 ? "+" : "") + bigNum(p.deltaShares),
+       "num " + (p.deltaShares > 0 ? "up" : p.deltaShares < 0 ? "dn" : "")],
+      [p.deltaPct == null ? "—" : fmtPct(p.deltaPct * 100),
+       "num " + (p.deltaPct > 0 ? "up" : p.deltaPct < 0 ? "dn" : "")],
+      [null, ""],
+    ];
+    cells.forEach(([txt, cls], i) => {
+      const td = document.createElement("td");
+      if (i === 7) {
+        if (p.action) { const b = document.createElement("span");
+          b.className = "badge b" + p.action; b.textContent = p.action;
+          td.appendChild(b); }
+      } else if (i === 0 && rec) {
+        const a = document.createElement("a");
+        a.href = "#"; a.textContent = txt;
+        a.addEventListener("click", ev => {
+          ev.preventDefault(); sel = p.ticker; sl.value = sel;
+          dtab = "hedge"; drawAll();
+          document.getElementById("drill").scrollIntoView({behavior: "smooth"});
+        });
+        td.appendChild(a);
+      } else { td.textContent = txt; td.className = cls; }
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb); wrap.appendChild(t); body.appendChild(wrap);
+
+  document.getElementById("fnote").textContent =
+    `${f.fund}'s positions in the ${R.length} names this page tracks, for `
+    + `${fv.quarter}, against ${fv.prevQuarter || "the prior quarter"}. `
+    + `The whole reported book is ${bigUSD(f.bookValue)} across `
+    + `${bigNum(f.nFiled)} equity lines, so what is shown here is the overlap `
+    + `with this universe rather than the fund. Share counts are adjusted for `
+    + `splits before differencing, so a 10-for-1 does not read as a position `
+    + `ten times larger. 13F is long US equity only, filed 45 days after `
+    + `quarter end.`;
+}
+
+function drawAll() { chart1(); chart2(); chart3(); drill(); fundView(); }
 drawAll();
 let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawAll, 150); });
 </script>

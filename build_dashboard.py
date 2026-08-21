@@ -34,6 +34,7 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+import edgar
 import extract
 import history
 
@@ -102,6 +103,63 @@ UNIVERSE: dict[str, dict[str, list[str]]] = {
 # equal-weight median return of its own tracked names (shown as "peer med").   #
 # Keys are sector names first, then sub-industry names.                        #
 # --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# The 13F fund roster
+# ---------------------------------------------------------------------------
+# CIKs are pinned rather than resolved by company-name search, because that
+# search is not reliable for managers: "Balyasny" returns three entities that
+# file no 13F at all, while the real filer (1218710) files under two different
+# legal names. Worse, a wrong CIK does not error -- it returns perfectly
+# parseable XML from the wrong book. Three of the first 28 resolved this way
+# were wrong and looked fine: Baupost's /ADV shell (last 13F 2002), Marshall
+# Wace *Asia* rather than LLP (2021), and Greenlight's pre-2024 entity, which
+# Einhorn superseded with DME Capital Management.
+#
+# edgar.STALE_QUARTERS is the guard: a pinned CIK that falls more than two
+# quarters behind is reported loudly rather than silently serving a stale book.
+# Tybourne was dropped from this roster after winding down in 2025.
+FUNDS: list[dict[str, str]] = [
+    # Tiger lineage -- concentrated long/short equity
+    {"name": "Tiger Global",    "cik": "0001167483", "cohort": "Tiger"},
+    {"name": "Coatue",          "cik": "0001135730", "cohort": "Tiger"},
+    {"name": "Lone Pine",       "cik": "0001061165", "cohort": "Tiger"},
+    {"name": "Viking Global",   "cik": "0001103804", "cohort": "Tiger"},
+    {"name": "Maverick",        "cik": "0000934639", "cohort": "Tiger"},
+    {"name": "D1 Capital",      "cik": "0001747057", "cohort": "Tiger"},
+    {"name": "Durable",         "cik": "0001798849", "cohort": "Tiger"},
+    {"name": "Light Street",    "cik": "0001569049", "cohort": "Tiger"},
+    {"name": "Whale Rock",      "cik": "0001387322", "cohort": "Tiger"},
+    {"name": "Altimeter",       "cik": "0001541617", "cohort": "Tiger"},
+    # Multi-strategy -- large books, much of which is hedging and market making
+    {"name": "Citadel",         "cik": "0001423053", "cohort": "Multi-strat"},
+    {"name": "Millennium",      "cik": "0001273087", "cohort": "Multi-strat"},
+    {"name": "Point72",         "cik": "0001603466", "cohort": "Multi-strat"},
+    {"name": "Balyasny",        "cik": "0001218710", "cohort": "Multi-strat"},
+    {"name": "ExodusPoint",     "cik": "0001736225", "cohort": "Multi-strat"},
+    {"name": "Schonfeld",       "cik": "0001665241", "cohort": "Multi-strat"},
+    {"name": "Verition",        "cik": "0001454027", "cohort": "Multi-strat"},
+    {"name": "Hudson Bay",      "cik": "0001393825", "cohort": "Multi-strat"},
+    # Concentrated / activist / value
+    {"name": "Pershing Square", "cik": "0001336528", "cohort": "Concentrated"},
+    {"name": "Third Point",     "cik": "0001040273", "cohort": "Concentrated"},
+    {"name": "Greenlight",      "cik": "0001489933", "cohort": "Concentrated"},
+    {"name": "Appaloosa",       "cik": "0001656456", "cohort": "Concentrated"},
+    {"name": "Baupost",         "cik": "0001061768", "cohort": "Concentrated"},
+    {"name": "TCI",             "cik": "0001647251", "cohort": "Concentrated"},
+    {"name": "Egerton",         "cik": "0001581811", "cohort": "Concentrated"},
+    {"name": "Marshall Wace",   "cik": "0001318757", "cohort": "Concentrated"},
+    {"name": "Soroban",         "cik": "0001517857", "cohort": "Concentrated"},
+]
+
+COHORTS: dict[str, str] = {f["name"]: f["cohort"] for f in FUNDS}
+
+# How many quarters of 13F history to hold. Two years: enough to tell a fund
+# building a position from one round-tripping it, which a single delta cannot.
+THIRTEENF_QUARTERS = 8
+
+CUSIP_MAP_PATH = DATA_DIR / "cusip_map.csv"
+
+
 PROXY_ETFS: dict[str, str | None] = {
     # sector level
     "TMT (Tech · Media · Telecom)": "XLK",
@@ -1239,13 +1297,106 @@ def record_history(df, closes, est_rows, as_of, failed, own=None):
         conn.close()
 
 
+def fetch_13f(force: bool = False) -> None:
+    """Pull any 13F filing the store is missing, then ingest it.
+
+    Almost always a no-op. A 13F lands 45 days after quarter end and does not
+    change again, so the store already holds every wanted filing on roughly 85
+    of every 90 days -- `edgar.collect_13f` compares accession numbers and makes
+    no request at all when nothing is new. That is what makes it safe to hang a
+    quarterly dataset off a daily run.
+    """
+    cusip_map = edgar.load_cusip_map(CUSIP_MAP_PATH)
+    if not cusip_map:
+        print("No data/cusip_map.csv -- skipping 13F "
+              "(build it with tools/build_cusip_map.py)")
+        return
+    quarters = edgar.quarter_ends(THIRTEENF_QUARTERS)
+    try:
+        conn = history.connect()
+        history.ensure_schema(conn)
+        already = {} if force else history.ingested_filings(conn)
+    except Exception as exc:  # noqa: BLE001
+        print(f"13F skipped, store unavailable: {exc}")
+        return
+
+    missing = sum(1 for f in FUNDS for q in quarters
+                  if (f["cik"], q) not in already)
+    if not missing:
+        print(f"13F current: {len(FUNDS)} funds x {len(quarters)} quarters.")
+        conn.close()
+        return
+
+    print(f"Fetching 13F filings ({missing} missing of "
+          f"{len(FUNDS) * len(quarters)})...")
+    rows, filings, raw, stale, failed = edgar.collect_13f(
+        FUNDS, quarters, cusip_map, already)
+
+    by_quarter: dict[str, list[dict]] = {}
+    for rec in raw:
+        by_quarter.setdefault(rec["quarter"], []).append(rec)
+    for quarter, records in by_quarter.items():
+        year, month, _ = quarter.split("-")
+        tag = f"{year}Q{(int(month) - 1) // 3 + 1}"
+        edgar.write_raw_archive(records, DATA_DIR / f"13f_{tag}.csv.gz")
+
+    try:
+        for filing in filings:
+            if filing.status == "ok":
+                history.replace_quarter(conn, filing.cik, filing.quarter)
+        written = history.upsert_thirteenf(conn, rows)
+        history.upsert_filings(conn, filings)
+        print(f"  stored {written} universe positions from "
+              f"{sum(1 for f in filings if f.status == 'ok')} filings")
+    except Exception as exc:  # noqa: BLE001 - the dashboard must still render
+        print(f"  13F store write failed: {exc}")
+    finally:
+        conn.close()
+
+    # Loud, because the failure mode this catches is silent: a superseded CIK
+    # returns valid XML from the wrong book rather than an error.
+    for line in stale:
+        print(f"  STALE CIK -- {line}")
+    if failed:
+        print(f"  13F fetch failed for: {', '.join(failed)}")
+
+
+def rebuild_13f() -> int:
+    """Re-ingest 13F from the raw archives with no network."""
+    cusip_map = edgar.load_cusip_map(CUSIP_MAP_PATH)
+    if not cusip_map:
+        print("No data/cusip_map.csv -- run tools/build_cusip_map.py first")
+        return 1
+    paths = sorted(DATA_DIR.glob("13f_*.csv.gz"))
+    if not paths:
+        print("No 13f_*.csv.gz archives found")
+        return 1
+    rows, filings = edgar.ingest_archives(paths, cusip_map)
+    conn = history.connect()
+    history.ensure_schema(conn)
+    conn.execute("DELETE FROM thirteenf")
+    conn.execute("DELETE FROM thirteenf_filings")
+    conn.commit()
+    written = history.upsert_thirteenf(conn, rows)
+    history.upsert_filings(conn, filings)
+    conn.close()
+    print(f"Rebuilt 13F from {len(paths)} archives: {written} universe "
+          f"positions across {len(filings)} filings")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-fetch", action="store_true",
                     help="rebuild from newest cached CSV instead of pulling live")
+    ap.add_argument("--rebuild-13f", action="store_true",
+                    help="re-ingest 13F from data/13f_*.csv.gz, no network")
     ap.add_argument("--rebuild-history", action="store_true",
                     help="drop history.db and rebuild it from the raw CSVs")
     args = ap.parse_args()
+
+    if args.rebuild_13f:
+        return rebuild_13f()
 
     if args.rebuild_history:
         conn = history.connect()
@@ -1267,10 +1418,10 @@ def main():
 
 def _run(args):
     if args.no_fetch:
-        caches = sorted(glob.glob(str(DATA_DIR / "fundamentals_*.csv")))
+        caches = [str(p) for p in history._dated(DATA_DIR, "fundamentals")]
         if not caches:
             sys.exit("No cached CSV found; run without --no-fetch first.")
-        df = pd.read_csv(caches[-1])
+        df = extract.read_csv_any(caches[-1])
         if "subindustry" not in df.columns:
             sys.exit(
                 f"Cache {caches[-1]} predates sub-industry grouping; "
@@ -1289,19 +1440,23 @@ def _run(args):
         print("Fetching price history...")
         df = attach_history(df)
         stamp = datetime.now().strftime("%Y%m%d")
-        df.to_csv(DATA_DIR / f"fundamentals_{stamp}.csv", index=False)
+        df.to_csv(extract.csv_path(DATA_DIR / f"fundamentals_{stamp}.csv"),
+                  index=False, compression="gzip")
 
         as_of = date.today()
         print("Fetching analyst estimates...")
         est_rows, failed = extract.collect_estimates(df["ticker"].tolist(), as_of)
         extract.write_estimates_csv(est_rows, DATA_DIR / f"estimates_{stamp}.csv")
 
-        print("Fetching ownership (13F holders, funds, insider filings)...")
+        print("Fetching ownership (top institutional and fund holders, "
+              "insider filings)...")
         holds, ins, own_failed = extract.collect_ownership(df["ticker"].tolist())
         extract.write_rows_csv(holds, extract.HOLDING_COLUMNS,
                                DATA_DIR / f"holdings_{stamp}.csv")
         extract.write_rows_csv(ins, extract.INSIDER_COLUMNS,
                                DATA_DIR / f"insiders_{stamp}.csv")
+
+        fetch_13f()
 
         print("Fetching 5y closes for the history store...")
         closes = fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD)
