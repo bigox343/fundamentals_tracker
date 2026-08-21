@@ -1,6 +1,6 @@
 # fundamentals_tracker
 
-A daily fundamentals dashboard and history store for 148 bellwether names across
+A daily fundamentals dashboard and history store for 153 bellwether names across
 TMT, Industrials, and Consumer.
 
 Each run pulls live fundamentals from Yahoo Finance, scores every metric against
@@ -43,7 +43,7 @@ Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock 
 python -m pytest tests/ -q
 ```
 
-160 tests, no network. Every parsing function is exercised against captured
+173 tests, no network. Every parsing function is exercised against captured
 fixtures in [tests/fixtures/](tests/fixtures/), which is why `extract.py` and
 `edgar.py` both keep their network-touching helpers confined to the bottom of
 the module.
@@ -55,7 +55,7 @@ the module.
 ```
 run_daily.sh
   └── build_dashboard.py
-        ├── fetch_all()            fundamentals for 148 tickers
+        ├── fetch_all()            fundamentals for 153 tickers
         ├── attach_history()       1y closes (YTD/1Y returns need the full year)
         │     └── data/fundamentals_YYYYMMDD.csv     (written, never pruned)
         ├── extract.collect_estimates()
@@ -66,6 +66,8 @@ run_daily.sh
         ├── fetch_closes(period=5y)
         ├── record_history()  ──►  data/history.db
         └── render_html()     ──►  dashboard.html
+  ├── visualize.py            ──►  history.html
+  └── tools/build_13f_report.py ──► reports/13f_YYYYQN.html
 ```
 
 `record_history()` is deliberately non-fatal: a store failure must not cost you
@@ -80,6 +82,7 @@ the dashboard.
 | [edgar.py](edgar.py) | SEC EDGAR, 13F information tables | SQL, HTML, the universe |
 | [history.py](history.py) | SQLite | yfinance, EDGAR, HTML |
 | [visualize.py](visualize.py) | Rendering the store as `history.html` | Fetching anything |
+| [tools/build_13f_report.py](tools/build_13f_report.py) | One quarter's 13F as a shareable page | Fetching anything |
 
 `MetricRow` is defined in `history.py` and imported by `extract.py` — it is the
 shared contract between producer and store. Importing a `NamedTuple` is not
@@ -220,7 +223,8 @@ accepted only when the price implied by the filers, `median(value / shares)`,
 matches the ticker's close in `history.db`. Ten managers independently agreeing
 that NVDA was $200.09 on 2026-06-30 is strong evidence, and the same check
 catches filers reporting thousands rather than dollars, since they miss by
-exactly 1000x. 148/148 names resolve at a median price error of **0.0000**.
+exactly 1000x. Every name the roster holds resolves this way, at a median
+price error of **0.0000**.
 
 Rebuild it with `python tools/build_cusip_map.py` after editing `UNIVERSE`,
 then `python build_dashboard.py --rebuild-13f`. Neither touches the network.
@@ -261,14 +265,39 @@ not inherit a shell environment — change that line if the env moves.
 
 ## The universe
 
-148 tickers, defined in `UNIVERSE` at the top of
+153 tickers, defined in `UNIVERSE` at the top of
 [build_dashboard.py](build_dashboard.py). Edit the lists to taste.
 
 | Sector | Tickers | Sub-industries |
 |---|---:|---:|
-| TMT (Tech · Media · Telecom) | 80 | 9 |
-| Industrials | 36 | 6 |
+| TMT (Tech · Media · Telecom) | 81 | 9 |
+| Industrials | 40 | 6 |
 | Consumer (Staples · Discretionary) | 32 | 5 |
+
+### On adding names
+
+Adding a ticker costs nothing in 13F terms. The archives hold the *full*
+information tables, not just universe hits, so a new name picks up its whole
+13F history with no network call:
+
+```bash
+python tools/build_cusip_map.py            # re-resolve, no network
+python build_dashboard.py --rebuild-13f    # re-ingest, no network
+```
+
+Its fundamentals and estimates, though, start from the day it is added. Prices
+and statements are recoverable; forward consensus is not, and Yahoo carries
+about 90 days of it. A name added late is permanently missing that history.
+
+Two things worth checking before adding one. Scoring is a percentile **within
+the sub-industry**, so a name only scores meaningfully against a peer set of
+real size — below about five members the percentile is coarse enough to be
+decorative. And the peer set has to be *comparable*: `Telecom` sits at four
+members and was deliberately left there, because every available US fill is
+distressed or sub-scale (Cable One at $0.1B, Lumen loss-making) against a set
+whose median is $180B. Adding them would have made the percentile worse, not
+better. Where no coherent peer exists, the `PROXY_ETFS` benchmark is doing the
+work instead.
 
 Each sub-industry is benchmarked against the liquid ETF that best stands in for
 it (`PROXY_ETFS`), falling back to the peer median where no clean proxy exists.

@@ -38,6 +38,8 @@ status=$?
 if [ $status -eq 0 ]; then
   "$PYTHON" visualize.py >> "$LOG" 2>&1 \
     || echo "visualize FAILED (dashboard and store are unaffected)" >> "$LOG"
+  "$PYTHON" tools/build_13f_report.py >> "$LOG" 2>&1 \
+    || echo "13F report FAILED (dashboard and store are unaffected)" >> "$LOG"
 fi
 
 if [ $status -eq 0 ]; then

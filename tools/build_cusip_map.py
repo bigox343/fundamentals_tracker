@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import history  # noqa: E402
-from build_dashboard import CUSIP_MAP_PATH, DATA_DIR  # noqa: E402
+from build_dashboard import CUSIP_MAP_PATH, DATA_DIR
+from edgar import FILINGS_MANIFEST  # noqa: E402
 
 # Accept a mapping when the implied price is within this of the real close.
 # Loose enough for a class-B/ADR spread, tight enough that a wrong issuer or a
@@ -92,7 +93,8 @@ def tokens(name: str) -> set[str]:
 
 
 def load_archives() -> pd.DataFrame:
-    paths = sorted(DATA_DIR.glob("13f_*.csv.gz"))
+    paths = [p for p in sorted(DATA_DIR.glob("13f_*.csv.gz"))
+             if p.name != FILINGS_MANIFEST]
     if not paths:
         raise SystemExit("no 13f_*.csv.gz archives found -- run tools/backfill_13f.py")
     frame = pd.concat([pd.read_csv(p, dtype=str, keep_default_na=False)
@@ -133,7 +135,12 @@ def main() -> int:
     print("Loading raw 13F archives...")
     frame = load_archives()
 
-    universe = pd.read_csv(sorted(DATA_DIR.glob("fundamentals_*.csv"))[-1])
+    import extract
+    # .csv.gz since the retention change; the plain glob silently matched
+    # nothing and would have taken the last pre-migration file, or crashed.
+    newest = history._dated(DATA_DIR, "fundamentals")[-1]
+    universe = extract.read_csv_any(newest)
+    print(f"  universe from {newest.name}")
     names = dict(zip(universe["ticker"], universe["name"]))
     quarters = sorted(frame["quarter"].unique())
 

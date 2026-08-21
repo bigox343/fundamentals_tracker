@@ -52,6 +52,7 @@ UNIVERSE: dict[str, dict[str, list[str]]] = {
         "Semiconductors": [
             "NVDA", "AVGO", "AMD", "QCOM", "TXN", "INTC", "MU", "ADI",
             "NXPI", "MRVL", "ON", "MCHP", "ARM", "MPWR", "ALAB", "CRDO",
+            "TSM",
         ],
         "Semicap Equipment": ["AMAT", "LRCX", "KLAC", "ASML", "TER", "ENTG"],
         "Software — Infrastructure": [
@@ -84,7 +85,8 @@ UNIVERSE: dict[str, dict[str, list[str]]] = {
         # Equipment on purpose: scoring VRT's growth against EMR/ROK's would
         # tint two different businesses against each other
         "Data Center & Power": ["GEV", "VRT", "PWR", "NVT", "HUBB"],
-        "Multi-Industrial": ["MMM", "CARR", "JCI", "IR"],
+        "Multi-Industrial": ["MMM", "CARR", "JCI", "IR", "TT", "OTIS",
+                             "ROP", "FTV"],
     },
     "Consumer (Staples · Discretionary)": {
         "Internet Retail": ["AMZN", "BKNG", "ABNB", "DASH", "EBAY", "CHWY"],
@@ -1389,7 +1391,8 @@ def rebuild_13f() -> int:
     if not cusip_map:
         print("No data/cusip_map.csv -- run tools/build_cusip_map.py first")
         return 1
-    paths = sorted(DATA_DIR.glob("13f_*.csv.gz"))
+    paths = [p for p in sorted(DATA_DIR.glob("13f_*.csv.gz"))
+             if p.name != edgar.FILINGS_MANIFEST]
     if not paths:
         print("No 13f_*.csv.gz archives found")
         return 1
