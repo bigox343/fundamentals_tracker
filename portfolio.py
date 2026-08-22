@@ -89,3 +89,31 @@ def thirteenf_signal(conn, as_of: str) -> pd.Series:
     grouped = changes.groupby("ticker")[["shares", "prev_shares"]].sum()
     prior = grouped["prev_shares"].where(grouped["prev_shares"] > 0)
     return ((grouped["shares"] - grouped["prev_shares"]) / prior).dropna()
+
+
+def insider_signal(conn, as_of: str, months: int = 12) -> pd.Series:
+    """Open-market insider purchases over a trailing window, log1p-scaled.
+
+    Purchases only, deliberately not net: sales outnumber purchases 24:1 in
+    this store and insiders sell for diversification, taxes and liquidity, so
+    a net measure would be dominated by the uninformative side. Grants, gifts
+    and derivative conversions are excluded for the same reason.
+
+    log1p rather than market-cap scaling because marketCap exists only as a
+    snapshot metric with days of history, and so cannot be reconstructed
+    point-in-time for the backtest.
+
+    Expect this to be empty for roughly two thirds of names: only 32% of the
+    universe has any purchase within 12 months. That sparsity is why the
+    caller standardizes this leg universe-wide rather than within sub-industry.
+    """
+    rows = pd.read_sql_query(
+        "SELECT ticker, value FROM insider_txns "
+        "WHERE txn_type LIKE 'Purchase%' AND as_of <= ? "
+        "AND as_of >= date(?, ?)",
+        conn, params=[as_of, as_of, f"-{months} months"])
+    if rows.empty:
+        return pd.Series(dtype=float)
+
+    totals = rows.groupby("ticker")["value"].sum()
+    return np.log1p(totals[totals > 0])

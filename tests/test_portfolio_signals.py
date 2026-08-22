@@ -99,3 +99,34 @@ def test_thirteenf_signal_is_split_adjusted(conn):
 
     signal = portfolio.thirteenf_signal(conn, "2026-08-21")
     assert signal["SPL"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_insider_signal_counts_only_open_market_purchases(conn):
+    from history import InsiderRow
+
+    history.upsert_insiders(conn, [
+        InsiderRow("AAA", "2026-08-01", "Jane Doe", "CEO",
+                   "Purchase at price 100.00 per share.", 1000, 100_000.0, "5000"),
+        InsiderRow("BBB", "2026-08-01", "John Roe", "CFO",
+                   "Stock Award(Grant) at price 0.00 per share.", 9999,
+                   999_999.0, "9999"),
+        InsiderRow("CCC", "2026-08-01", "Ann Poe", "CTO",
+                   "Sale at price 100.00 per share.", 5000, 500_000.0, "100"),
+    ])
+
+    signal = portfolio.insider_signal(conn, "2026-08-21", months=12)
+
+    assert signal["AAA"] > 0
+    assert "BBB" not in signal      # grant excluded
+    assert "CCC" not in signal      # sale excluded
+
+
+def test_insider_signal_respects_the_lookback_window(conn):
+    from history import InsiderRow
+
+    history.upsert_insiders(conn, [
+        InsiderRow("OLD", "2024-01-01", "Jane Doe", "CEO",
+                   "Purchase at price 10.00 per share.", 100, 1_000.0, "100"),
+    ])
+
+    assert "OLD" not in portfolio.insider_signal(conn, "2026-08-21", months=12)
