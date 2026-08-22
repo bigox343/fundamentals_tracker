@@ -18,7 +18,18 @@
       "Bash(git config *)",
       "Bash(git add *)",
       "Bash(git commit -q -m 'Initial commit: weekly fundamentals tracker *)",
-      "Bash(git commit -q -m 'Add design spec for daily fundamentals capture and history store *)"
+      "Bash(git commit -q -m 'Add design spec for daily fundamentals capture and history store *)",
+      "Bash(pwd -P)",
+      "Bash(awk '{print $1, $2, $9}')",
+      "Bash(ps -p 62177,57330,57555,62642,63855,67806,7133,7271,7450,66209,57341,59118,62071,7441,7447,79356,84516 -o pid,ppid,etime,command)",
+      "Bash(plutil -extract ProgramArguments xml1 -o - ~/Library/LaunchAgents/com.owen.fundamentals-tracker.plist)",
+      "Read(//bin/**)",
+      "Read(//Users/owen/**)",
+      "Bash(git -C /Users/owen/Desktop/fundamentals_tracker status --short)",
+      "Bash(git -C /Users/owen/Desktop/fundamentals_tracker.worktrees/understanding-view-concept status --short)",
+      "Bash(set -e)",
+      "Bash(mv /Users/owen/Desktop/fundamentals_tracker /Users/owen/fundamentals_tracker)",
+      "Bash(mv /Users/owen/Desktop/fundamentals_tracker.worktrees /Users/owen/fundamentals_tracker.worktrees)"
     ]
   }
 }
