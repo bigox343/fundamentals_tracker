@@ -64,3 +64,28 @@ def momentum_signal(conn, as_of: str, lookback: int = 252,
     end = wide.iloc[-(skip + 1)]
     start = wide.iloc[-(lookback + 1)]
     return (end / start - 1.0).dropna()
+
+
+def thirteenf_signal(conn, as_of: str) -> pd.Series:
+    """Aggregate quarter-over-quarter change in tracked-manager ownership.
+
+    Delegates to history.thirteenf_changes, which already puts last quarter's
+    counts on this quarter's share basis. Differencing raw as-filed counts
+    would render a 25:1 split as a manager adding 2,400%, and the error is
+    worse in a difference than in a level.
+    """
+    import history
+
+    # Sorted explicitly: thirteenf_quarters returns newest-first, and relying
+    # on that ordering silently inverts the sign of every delta.
+    quarters = sorted(q for q in history.thirteenf_quarters(conn) if q <= as_of)
+    if len(quarters) < 2:
+        return pd.Series(dtype=float)
+
+    changes = history.thirteenf_changes(conn, quarters[-1], quarters[-2])
+    if changes.empty:
+        return pd.Series(dtype=float)
+
+    grouped = changes.groupby("ticker")[["shares", "prev_shares"]].sum()
+    prior = grouped["prev_shares"].where(grouped["prev_shares"] > 0)
+    return ((grouped["shares"] - grouped["prev_shares"]) / prior).dropna()
