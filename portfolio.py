@@ -37,3 +37,30 @@ def eligible_universe(rets: pd.DataFrame, min_obs: int = MIN_OBS) -> list[str]:
         return []
     counts = rets.notna().sum()
     return sorted(counts[counts >= min_obs].index)
+
+
+# --------------------------------------------------------------------------- #
+# Alpha legs                                                                   #
+# --------------------------------------------------------------------------- #
+def momentum_signal(conn, as_of: str, lookback: int = 252,
+                    skip: int = 21) -> pd.Series:
+    """12-1 momentum: return over `lookback` days, excluding the last `skip`.
+
+    The skip is not optional. The most recent month carries short-term
+    reversal, which works against medium-term momentum; including it degrades
+    the signal rather than sharpening it.
+    """
+    closes = pd.read_sql_query(
+        "SELECT ticker, as_of, value FROM metrics "
+        "WHERE period_type = 'daily' AND metric = 'close' AND as_of <= ? "
+        "ORDER BY as_of", conn, params=[as_of])
+    if closes.empty:
+        return pd.Series(dtype=float)
+
+    wide = closes.pivot(index="as_of", columns="ticker", values="value")
+    if len(wide) < lookback + 1:
+        lookback = len(wide) - 1
+
+    end = wide.iloc[-(skip + 1)]
+    start = wide.iloc[-(lookback + 1)]
+    return (end / start - 1.0).dropna()
