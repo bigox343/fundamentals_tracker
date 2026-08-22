@@ -33,6 +33,8 @@ which pins `pytest>=8.0` for the test suite.
 | `python build_dashboard.py --no-fetch` | Re-render from the newest cached CSV. No network, no new history. |
 | `python build_dashboard.py --rebuild-13f` | Re-ingest 13F from `data/13f_*.csv.gz`. No network. |
 | `python build_dashboard.py --rebuild-history` | Drop `history.db` and reconstruct it from the raw CSVs, then exit |
+| `python tools/build_portfolio_report.py [YYYY-MM-DD]` | Solve the market-neutral book, record weights, write `reports/portfolio_*.html` |
+| `python tools/backtest_portfolio.py` | Walk-forward backtest of the same book |
 
 Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock on
 `.run.lock` itself, because macOS ships no `flock(1)`.
@@ -43,7 +45,7 @@ Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock 
 python -m pytest tests/ -q
 ```
 
-173 tests, no network. Every parsing function is exercised against captured
+207 tests, no network. Every parsing function is exercised against captured
 fixtures in [tests/fixtures/](tests/fixtures/), which is why `extract.py` and
 `edgar.py` both keep their network-touching helpers confined to the bottom of
 the module.
@@ -83,6 +85,10 @@ the dashboard.
 | [history.py](history.py) | SQLite | yfinance, EDGAR, HTML |
 | [visualize.py](visualize.py) | Rendering the store as `history.html` | Fetching anything |
 | [tools/build_13f_report.py](tools/build_13f_report.py) | One quarter's 13F as a shareable page | Fetching anything |
+| [portfolio.py](portfolio.py) | Alpha legs, the factor risk model, the cvxpy problem | Fetching, HTML, SQL writes |
+| [factors.py](factors.py) | The Ken French library's CSV shapes | SQL, HTML, optimization |
+| [tools/build_portfolio_report.py](tools/build_portfolio_report.py) | One day's book as a shareable page | Fetching anything |
+| [tools/backtest_portfolio.py](tools/backtest_portfolio.py) | Walk-forward evaluation | Fetching, HTML |
 
 `MetricRow` is defined in `history.py` and imported by `extract.py` — it is the
 shared contract between producer and store. Importing a `NamedTuple` is not
@@ -327,3 +333,59 @@ Working documents under [docs/superpowers/](docs/superpowers/):
 The design doc lists five further sub-projects that build on this one: return
 attribution (`return = re-rating + revision`), delta badges, statement backfill,
 inflection detection, and per-metric drill-down.
+
+---
+
+## Portfolio construction
+
+A dollar-, sector- and factor-neutral long/short book over the same universe,
+solved with `cvxpy`. It runs **outside** the daily path — `build_dashboard.py`
+never imports it, so a solver failure cannot cost you the dashboard, for the
+same reason `record_history()` is non-fatal.
+
+```
+portfolio.py                     alpha composite, factor risk model, the solve
+factors.py                       Fama-French factor returns (Ken French library)
+tools/build_portfolio_report.py  solve -> record -> reports/portfolio_*.html
+tools/backtest_portfolio.py      walk-forward evaluation
+```
+
+**Alpha** is an equal-weight blend of three legs, z-scored within sub-industry:
+12-1 momentum, quarter-over-quarter change in tracked-manager 13F ownership,
+and open-market insider purchases. The insider leg standardizes universe-wide
+instead, because only 32% of names have a purchase within 12 months and
+sub-industry groups of median 7 cannot support a within-group moment.
+
+**Risk** is `Σ = B F Bᵀ + D` over 8 observable return series — FF5, UMD, and two
+universe-relative sector factors with the third sector as base. That is 1,413
+estimated parameters against 11,781 for a full sample covariance, and it is
+positive-definite by construction.
+
+**The book** maximizes `μᵀw` less a turnover penalty, subject to an 8% ex-ante
+vol cap, `Bᵀw = 0`, dollar and per-sector neutrality, gross ≤ 200%, a 4%
+position cap, and a 10% sub-industry band. There is no `λ·wᵀΣw` term: with `μ`
+in z-score units λ has no interpretable scale, so the vol cap sets the scale
+instead.
+
+### What the backtest does and does not establish
+
+Over 2024-09 to 2026-07 (23 monthly rebalances, bounded by 13F availability)
+the book returned **0.55%/month after 10bps turnover costs, IR 0.76, max
+drawdown 5.8%**, with every period solving cleanly.
+
+**That IR is not significant.** t = 1.05, p = 0.30, and SE(IR) ≈ 0.72 at n = 23.
+It is consistent with a real edge and equally consistent with noise. Seven
+independent 13F changes cannot distinguish those. This is a sanity check that
+the pipeline is not broken — not evidence that the signals work. The
+`target_weights` record accumulates genuine out-of-sample evidence from the day
+it ships, and that is what should eventually settle the question.
+
+Turnover averages 1.43 but splits sharply: **2.61 at quarter ends versus 0.80
+elsewhere**, as the 13F leg refreshes when filings land. The turnover penalty
+exists to damp exactly that.
+
+### Deferred
+
+Estimate revisions are the strongest candidate signal and are **not** in the
+blend: the store holds 25 days of `epsEst` and 5 of revision breadth. The leg
+is a one-line addition to `LEG_WEIGHTS` once roughly 12 months accumulate.
