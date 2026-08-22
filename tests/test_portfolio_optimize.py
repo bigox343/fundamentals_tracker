@@ -68,3 +68,52 @@ def test_turnover_penalty_pulls_toward_previous_weights(setup):
                             config=portfolio.OptimizerConfig(turnover_penalty=5.0))
 
     assert (tight.weights - prev).abs().sum() < (loose.weights - prev).abs().sum()
+
+
+def test_a_zero_book_is_reported_as_degenerate_not_optimal(setup):
+    """w=0 satisfies every constraint, so the trivial book always "solves".
+
+    Every constraint is an equality to zero or an upper bound, which means
+    this problem is effectively never infeasible -- the realistic failure is
+    the solver returning nothing worth holding. That must not read as success.
+    """
+    mu, rm, sectors, subind = setup
+    cfg = portfolio.OptimizerConfig(subindustry_band=0.0, vol_target=1e-9)
+    sol = portfolio.solve(mu, rm, sectors, subind, config=cfg)
+
+    assert sol.status == "degenerate"
+    assert sol.weights.abs().sum() < portfolio.DEGENERATE_GROSS
+
+
+def test_infeasible_problem_relaxes_subindustry_first(setup):
+    mu, rm, sectors, subind = setup
+    # A negative band is genuinely unsatisfiable for any w, including zero,
+    # which is what it takes to reach the ladder at all.
+    cfg = portfolio.OptimizerConfig(subindustry_band=-0.01)
+    sol = portfolio.solve(mu, rm, sectors, subind, config=cfg)
+
+    assert sol.relaxations[0] == "subindustry_band"
+    assert sol.status.startswith("relaxed:")
+
+
+def test_neutrality_is_never_relaxed(setup):
+    mu, rm, sectors, subind = setup
+    cfg = portfolio.OptimizerConfig(vol_target=1e-9, gross_cap=1e-9,
+                                    subindustry_band=0.0)
+    sol = portfolio.solve(mu, rm, sectors, subind, config=cfg)
+
+    # Whatever happened, the book is still neutral -- or it failed outright.
+    if sol.status != "infeasible":
+        assert abs(sol.weights.sum()) < 1e-6
+        assert np.abs(rm.B.values.T @ sol.weights.values).max() < 1e-6
+    assert "sector_neutral" not in sol.relaxations
+    assert "factor_neutral" not in sol.relaxations
+
+
+def test_hopeless_problem_returns_infeasible_not_garbage(setup):
+    mu, rm, sectors, subind = setup
+    cfg = portfolio.OptimizerConfig(position_cap=-1.0)
+    sol = portfolio.solve(mu, rm, sectors, subind, config=cfg)
+
+    assert sol.status == "infeasible"
+    assert (sol.weights == 0).all()

@@ -6,7 +6,7 @@ knowledge lives.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import cvxpy as cp
@@ -344,10 +344,54 @@ def solve(mu: pd.Series, rm: RiskModel, sectors: pd.Series,
     problem.solve()
 
     if problem.status in ("optimal", "optimal_inaccurate"):
-        return Solution(pd.Series(w.value, index=rm.tickers), "optimal", [])
+        weights = pd.Series(w.value, index=rm.tickers)
+        return Solution(weights, _grade(weights), [])
 
     return _relax(mu, cov, rm, sector_masks, subind_masks, prev, cfg)
 
 
+# Every constraint here is either an equality to zero or an upper bound, so
+# w = 0 always satisfies all of them: this problem is effectively never
+# infeasible. The failure that actually happens is the trivial book -- the
+# solver finding nothing worth holding -- which looks like success unless it
+# is named. A zero book must never be mistaken for a solved one.
+DEGENERATE_GROSS = 1e-4
+
+
+def _grade(weights: pd.Series) -> str:
+    if float(weights.abs().sum()) < DEGENERATE_GROSS:
+        return "degenerate"
+    return "optimal"
+
+
+# Relaxed in this order and no other. Dollar, sector and factor neutrality are
+# absent by design: they define what the portfolio is, and a book that quietly
+# stopped being neutral is worse than no book at all.
+_LADDER = [
+    ("subindustry_band",
+     lambda c: replace(c, subindustry_band=min(c.subindustry_band * 4 + 0.05, 1.0))),
+    ("gross_cap", lambda c: replace(c, gross_cap=c.gross_cap * 1.5)),
+    ("vol_target", lambda c: replace(c, vol_target=c.vol_target * 1.5)),
+]
+
+
 def _relax(mu, cov, rm, sector_masks, subind_masks, prev, cfg) -> Solution:
-    raise NotImplementedError
+    """Loosen one constraint at a time, recording each step that was taken."""
+    applied: list[str] = []
+
+    for name, loosen in _LADDER:
+        cfg = loosen(cfg)
+        applied.append(name)
+        w, problem = _problem(mu, cov, rm.B, sector_masks, subind_masks, prev, cfg)
+        try:
+            problem.solve()
+        except cp.error.SolverError:
+            continue
+        if problem.status in ("optimal", "optimal_inaccurate"):
+            weights = pd.Series(w.value, index=rm.tickers)
+            if _grade(weights) == "degenerate":
+                continue
+            return Solution(weights, f"relaxed:{'+'.join(applied)}", applied)
+
+    # Still infeasible. The previous book stands; say so rather than invent one.
+    return Solution(pd.Series(0.0, index=rm.tickers), "infeasible", applied)
