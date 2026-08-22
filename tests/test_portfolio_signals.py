@@ -130,3 +130,41 @@ def test_insider_signal_respects_the_lookback_window(conn):
     ])
 
     assert "OLD" not in portfolio.insider_signal(conn, "2026-08-21", months=12)
+
+
+def test_zscore_within_groups_is_computed_per_group():
+    s = pd.Series({"A": 1.0, "B": 3.0, "C": 10.0, "D": 30.0})
+    groups = pd.Series({"A": "x", "B": "x", "C": "y", "D": "y"})
+    z = portfolio.zscore(s, groups=groups)
+
+    # Within each pair the lower value is negative, the higher positive.
+    assert z["A"] < 0 < z["B"]
+    assert z["C"] < 0 < z["D"]
+
+
+def test_zscore_clips_outliers():
+    s = pd.Series({f"T{i}": 0.0 for i in range(50)} | {"OUT": 1e6})
+    z = portfolio.zscore(s, clip=3.0)
+
+    assert z["OUT"] == pytest.approx(3.0)
+
+
+def test_zscore_of_a_constant_group_is_zero_not_nan():
+    s = pd.Series({"A": 5.0, "B": 5.0})
+    z = portfolio.zscore(s)
+
+    assert z.tolist() == pytest.approx([0.0, 0.0])
+
+
+def test_missing_leg_contributes_zero_not_nan():
+    """A name absent from a sparse leg must be neutral, never dropped."""
+    legs = {
+        "momentum": pd.Series({"AAA": 1.0, "BBB": -1.0}),
+        "13f": pd.Series({"AAA": 0.5}),          # BBB absent
+        "insider": pd.Series(dtype=float),        # entirely empty
+    }
+    frame = portfolio.blend(legs, ["AAA", "BBB"])
+
+    assert set(frame.index) == {"AAA", "BBB"}
+    assert frame.loc["BBB", "contrib_13f"] == 0.0
+    assert frame["mu"].notna().all()

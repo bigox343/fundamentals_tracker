@@ -117,3 +117,72 @@ def insider_signal(conn, as_of: str, months: int = 12) -> pd.Series:
 
     totals = rows.groupby("ticker")["value"].sum()
     return np.log1p(totals[totals > 0])
+
+
+LEG_WEIGHTS = {"momentum": 1 / 3, "13f": 1 / 3, "insider": 1 / 3}
+
+
+def zscore(series: pd.Series, groups: pd.Series | None = None,
+           clip: float = 3.0) -> pd.Series:
+    """Standardize, optionally within groups, winsorized at +/- `clip`.
+
+    A group whose values are all identical yields zero, not NaN: "no
+    dispersion" is neutral information, and a NaN would silently drop the name
+    from the optimization.
+    """
+    if series.empty:
+        return series
+
+    def _z(block: pd.Series) -> pd.Series:
+        spread = block.std(ddof=0)
+        if not np.isfinite(spread) or spread == 0:
+            return pd.Series(0.0, index=block.index)
+        return (block - block.mean()) / spread
+
+    if groups is None:
+        out = _z(series)
+    else:
+        out = series.groupby(groups.reindex(series.index)).transform(_z)
+    return out.clip(-clip, clip)
+
+
+def blend(legs: dict[str, pd.Series], universe: list[str],
+          weights: dict[str, float] | None = None) -> pd.DataFrame:
+    """Combine standardized legs into mu, keeping per-leg contributions.
+
+    Every name in `universe` gets a row. A name missing from a sparse leg
+    contributes zero for that leg -- neutral -- rather than being dropped,
+    which matters because the insider leg is empty for roughly two thirds of
+    names by construction.
+    """
+    weights = LEG_WEIGHTS if weights is None else weights
+    frame = pd.DataFrame(index=pd.Index(universe, name="ticker"))
+
+    for name, series in legs.items():
+        if series.empty:
+            frame[f"contrib_{name}"] = 0.0
+        else:
+            frame[f"contrib_{name}"] = (
+                series.reindex(universe).fillna(0.0) * weights[name])
+
+    frame["mu"] = frame[[f"contrib_{n}" for n in legs]].sum(axis=1)
+    return frame
+
+
+def build_alpha(conn, as_of: str, universe: list[str],
+                subindustry: pd.Series) -> pd.DataFrame:
+    """The full composite: three legs, standardized, blended.
+
+    Momentum and 13F standardize within sub-industry, matching how the
+    dashboard scores. The insider leg standardizes across the full universe
+    instead: sub-industry groups have a median of 7 names and roughly 70% of
+    them are zero, which does not support a within-group moment estimate.
+    """
+    legs = {
+        "momentum": zscore(momentum_signal(conn, as_of).reindex(universe).dropna(),
+                           groups=subindustry),
+        "13f": zscore(thirteenf_signal(conn, as_of).reindex(universe).dropna(),
+                      groups=subindustry),
+        "insider": zscore(insider_signal(conn, as_of).reindex(universe).dropna()),
+    }
+    return blend(legs, universe)
