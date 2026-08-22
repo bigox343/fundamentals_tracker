@@ -66,6 +66,35 @@ blend changes.
 - 20 sub-industries: median 7 names, **smallest 4** (Telecom), largest 17
   (Semiconductors).
 
+### 2.2a Insider purchases are extremely sparse
+
+`insider_txns.txn_type` is free text, not a category. Normalized across all
+8,249 stored rows:
+
+| Family | Rows |
+|---|---:|
+| Sale | 3,644 |
+| Stock Award(Grant) | 3,071 |
+| Conversion of Exercise of derivative security | 950 |
+| Stock Gift | 431 |
+| **Purchase** | **153** |
+
+Open-market purchases — the only family with documented predictive content —
+are 1.9% of rows. Coverage by lookback window, as of 2026-08-19:
+
+| Window | Purchases | Tickers with ≥1 | Coverage |
+|---|---:|---:|---:|
+| 6 months | 56 | 31 / 153 | 20% |
+| 12 months | 106 | 49 / 153 | 32% |
+| 24 months | 153 | 61 / 153 | 40% |
+
+**Consequence:** a 6-month net-buying signal z-scored within sub-industry — the
+original §4 definition — is degenerate. It would leave 80% of the universe at
+exactly zero, and sub-industry groups of median 7 names would typically contain
+five or six zeros, so the "z-score" would reduce to *did anyone in this small
+group happen to buy*, scaled by a standard deviation estimated from almost
+nothing. §4 is defined against these measurements instead.
+
 Barra-style commercial models run ~60 industries over thousands of names —
 roughly 30-50 names per bucket. Twenty sub-industry factors here would average
 7.6, and a 4-name industry factor return is essentially those four stocks'
@@ -115,7 +144,7 @@ already scores), winsorized at ±3σ, then equal-weighted:
 |---|---|---|
 | `z_momentum` | 12-month return skipping the most recent month | stored closes |
 | `z_13f` | QoQ change in aggregate share count held across the 27 tracked managers | `thirteenf` |
-| `z_insider` | Net open-market insider buying over trailing 6 months, value-weighted | `insider_txns` |
+| `z_insider` | Open-market **purchases only**, trailing **12 months**, `log1p(value)`, standardized **across the full universe** | `insider_txns` |
 
 Details that are load-bearing:
 
@@ -126,9 +155,26 @@ Details that are load-bearing:
   as-filed while stored closes are back-adjusted; the README records that a 25:1
   split otherwise renders as a manager adding 2,400%. The same trap applies to a
   QoQ *change*, more severely — it is the difference that explodes.
-- **Insider transactions are filtered to open-market buys and sells.** Option
-  exercises, grants and tax withholding carry no information about conviction
-  and would dominate by count.
+- **The insider leg is purchases only, and deliberately not "net".** Sales
+  outnumber purchases 24:1 (§2.2a) and are largely uninformative — insiders sell
+  for diversification, taxes and liquidity constantly. A net measure would be
+  dominated by the uninformative side. Grants, gifts and derivative conversions
+  are excluded for the same reason and would otherwise dominate by count.
+- **The insider leg breaks two rules the other legs follow, both because of
+  sparsity (§2.2a).** It uses a 12-month window rather than the shorter windows
+  used elsewhere (32% coverage versus 20% at 6 months), and it standardizes
+  across the **full universe** rather than within sub-industry, because
+  sub-industry groups of median 7 names with ~70% zeros do not support a
+  meaningful within-group moment estimate.
+- **Value is `log1p`-scaled, not market-cap-scaled.** Scaling by market cap would
+  be preferable in principle, but `marketCap` exists only as a `snapshot` metric
+  with 5 days of history, so it cannot be reconstructed point-in-time for the
+  backtest. `log1p` compresses the dollar range without needing any second
+  series.
+- **Expect this leg to be neutral for roughly two thirds of names.** It
+  contributes a sparse tilt, not a full cross-sectional ranking, so its
+  *effective* weight is below its nominal one-third. The backtest's per-leg
+  attribution (§9) measures this rather than assuming it.
 - **Staleness decays rather than persists.** Each leg carries its own `as_of`.
   13F data is 45+ days stale the day it arrives and updates quarterly; past its
   validity window a signal decays to zero rather than holding stale conviction
@@ -151,16 +197,38 @@ A structural factor model replaces sample covariance:
 
 ### 5.1 Factors
 
-Nine, all observable:
+Eight, all observable **return series**:
 
 - **FF5** — Mkt-RF, SMB, HML, RMW, CMA (Ken French data library, daily)
 - **UMD** — momentum (same source)
-- **3 sector dummies** — TMT, Industrials, Consumer
+- **2 sector factors** — universe-relative returns for TMT and Industrials,
+  built from the repo's own stored closes. Consumer is the implicit base.
+
+Three construction details, each of which produces a broken model if missed:
+
+- **Sector factors are return series, not dummies.** `B` is estimated by
+  time-series regression on factor returns; a 0/1 membership dummy is not a
+  return and cannot be regressed on. Barra-style models solve this the opposite
+  way — dummies as loadings, factor returns recovered by cross-sectional
+  regression — but the two schemes cannot be mixed in one `B`.
+- **Sector factors are universe-relative** (sector equal-weighted return minus
+  universe equal-weighted return), not raw sector returns. Raw sector returns
+  correlate ≈0.9 with Mkt-RF; regressing on both yields unstable loadings.
+- **Only two of the three are used.** Universe-relative sector returns sum to
+  zero by construction, so all three together are rank-deficient and the
+  regression is singular. Consumer is absorbed into the base.
+
+Sector *neutrality* is imposed separately as an exact linear constraint on all
+three sectors (§6). Membership is known exactly, so it is constrained rather
+than inferred — but the sector factors remain in `B` so that `Σ` prices
+within-sector co-movement, instead of dumping it into a diagonal `D` that
+assumes independence and would overstate the risk of an intra-sector long/short
+pair.
 
 Parameter count is the point. A full 153×153 sample covariance has **11,781**
 free parameters estimated from 504 observations. The factor model has
-1,377 loadings + 45 factor-covariance terms + 153 specific variances =
-**1,575**, and is positive-definite by construction.
+1,224 loadings + 36 factor-covariance terms + 153 specific variances =
+**1,413**, and is positive-definite by construction.
 
 ### 5.2 UMD is coupled to the momentum alpha leg
 
@@ -208,8 +276,9 @@ without the optimizer changing.
 maximize    μᵀw  −  κ·‖w − w_prev‖₁
 
 subject to  wᵀΣw ≤ σ_target²           ex-ante vol cap, 8% annualized
-            Bᵀw = 0                     factor neutral (all 9)
+            Bᵀw = 0                     factor neutral (all 8)
             1ᵀw = 0                     dollar neutral
+            Σ_{i∈sector} wᵢ = 0         sector neutral, each of the 3
             ‖w‖₁ ≤ 2.0                  gross ≤ 200%
             |wᵢ| ≤ 0.04                 position cap
             |Σ_{i∈subindustry} wᵢ| ≤ 0.10   sub-industry band
@@ -226,6 +295,11 @@ from textbook mean-variance, and it does so deliberately.
 **`Bᵀw = 0` subsumes the earlier `βᵀw = 0`.** Market beta is the first column of
 `B`, so market neutrality falls out of factor neutrality rather than being a
 separate constraint.
+
+**`1ᵀw = 0` is implied by the three sector equalities** and is stated anyway.
+The redundancy is harmless for the interior-point solvers cvxpy dispatches to,
+and keeping it explicit means dollar neutrality survives if the sector
+constraints are ever changed.
 
 **The turnover penalty is required, not optional.** 13F updates quarterly and
 insider filings arrive sporadically; without κ, a monthly rebalance churns on
@@ -263,7 +337,7 @@ The solver relaxes in a documented, recorded order:
 2. Gross exposure cap
 3. Volatility target
 
-**Dollar and factor neutrality are never relaxed.** They define what the
+**Dollar, sector and factor neutrality are never relaxed.** They define what the
 portfolio *is*; a book that quietly stopped being market neutral is worse than
 no book. If the problem is still infeasible after step 3, the solve fails, the
 previous weights stand, and the shortfall is reported — mirroring how
