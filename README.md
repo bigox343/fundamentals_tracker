@@ -1,6 +1,6 @@
 # fundamentals_tracker
 
-A daily fundamentals dashboard and history store for 148 bellwether names across
+A daily fundamentals dashboard and history store for 153 bellwether names across
 TMT, Industrials, and Consumer.
 
 Each run pulls live fundamentals from Yahoo Finance, scores every metric against
@@ -31,6 +31,7 @@ which pins `pytest>=8.0` for the test suite.
 |---|---|
 | `python build_dashboard.py` | Fetch live, write `dashboard.html`, record the day to `data/` |
 | `python build_dashboard.py --no-fetch` | Re-render from the newest cached CSV. No network, no new history. |
+| `python build_dashboard.py --rebuild-13f` | Re-ingest 13F from `data/13f_*.csv.gz`. No network. |
 | `python build_dashboard.py --rebuild-history` | Drop `history.db` and reconstruct it from the raw CSVs, then exit |
 
 Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock on
@@ -42,9 +43,10 @@ Only one instance runs at a time — `build_dashboard.py` takes an `fcntl` lock 
 python -m pytest tests/ -q
 ```
 
-96 tests, no network. Every parsing function is exercised against captured
-fixtures in [tests/fixtures/](tests/fixtures/), which is why `extract.py` keeps
-its network-touching helpers confined to the bottom of the module.
+173 tests, no network. Every parsing function is exercised against captured
+fixtures in [tests/fixtures/](tests/fixtures/), which is why `extract.py` and
+`edgar.py` both keep their network-touching helpers confined to the bottom of
+the module.
 
 ---
 
@@ -53,14 +55,19 @@ its network-touching helpers confined to the bottom of the module.
 ```
 run_daily.sh
   └── build_dashboard.py
-        ├── fetch_all()            fundamentals for 148 tickers
+        ├── fetch_all()            fundamentals for 153 tickers
         ├── attach_history()       1y closes (YTD/1Y returns need the full year)
         │     └── data/fundamentals_YYYYMMDD.csv     (written, never pruned)
         ├── extract.collect_estimates()
-        │     └── data/estimates_YYYYMMDD.csv        (written, never pruned)
+        │     └── data/estimates_YYYYMMDD.csv.gz     (written, never pruned)
+        ├── fetch_13f()            quarterly; usually makes no request at all
+        │     ├── data/13f_YYYYQN.csv.gz             (written, never pruned)
+        │     └── data/13f_filings.csv.gz            (manifest of every filing)
         ├── fetch_closes(period=5y)
         ├── record_history()  ──►  data/history.db
         └── render_html()     ──►  dashboard.html
+  ├── visualize.py            ──►  history.html
+  └── tools/build_13f_report.py ──► reports/13f_YYYYQN.html
 ```
 
 `record_history()` is deliberately non-fatal: a store failure must not cost you
@@ -70,9 +77,12 @@ the dashboard.
 
 | File | Knows about | Deliberately does not know about |
 |---|---|---|
-| [build_dashboard.py](build_dashboard.py) | The universe, scoring, HTML rendering, the run flow | — |
+| [build_dashboard.py](build_dashboard.py) | The universe, the fund roster, scoring, HTML rendering, the run flow | — |
 | [extract.py](extract.py) | yfinance frame shapes, fiscal calendars | SQL, HTML |
-| [history.py](history.py) | SQLite | yfinance, HTML |
+| [edgar.py](edgar.py) | SEC EDGAR, 13F information tables | SQL, HTML, the universe |
+| [history.py](history.py) | SQLite | yfinance, EDGAR, HTML |
+| [visualize.py](visualize.py) | Rendering the store as `history.html` | Fetching anything |
+| [tools/build_13f_report.py](tools/build_13f_report.py) | One quarter's 13F as a shareable page | Fetching anything |
 
 `MetricRow` is defined in `history.py` and imported by `extract.py` — it is the
 shared contract between producer and store. Importing a `NamedTuple` is not
@@ -84,7 +94,15 @@ knowledge of SQL.
 
 ### `data/` is the record of truth
 
-The dated CSVs are plain text and are **never pruned**. `history.db` is derived
+The dated CSVs are gzipped text and are **never pruned**. They compress 5.9x
+blended (estimates 8.8x, insiders 6.3x, fundamentals only 2.2x), which takes
+`data/` from 433 MB/yr to 73 MB/yr.
+
+Compressing rather than pruning is deliberate. Deleting old dated files would
+not lose data today — it is all in `history.db` — but it would delete the
+*rebuild path*, inverting the guarantee below: pruned, the database becomes the
+only copy of the perishable estimate history. Files written before the switch
+are still read, so no migration is required. `history.db` is derived
 from them and therefore disposable — a corrupted or deleted database costs a
 `--rebuild-history`, not data.
 
@@ -146,6 +164,89 @@ guarantee.
 
 ---
 
+## 13F hedge-fund holdings
+
+27 marquee managers — the Tiger lineage, the multi-strats, and a
+concentrated/activist sleeve — pulled from their own 13F-HR filings on SEC
+EDGAR and joined into the universe. Both the per-company drilldown and a
+fund-first view live in `history.html`.
+
+This is a different dataset from the `holdings` table, despite the similar
+shape. `holdings` is Yahoo's top-10 list per ticker, which is BlackRock,
+Vanguard and State Street on every name and contains **no hedge fund at all**.
+13F is filed per *manager*, so it inverts the grain of every other fetch here:
+you pull N funds and join in, rather than pulling N tickers.
+
+`FUNDS` in [build_dashboard.py](build_dashboard.py) pins each manager's CIK.
+Pinning is not fussiness — a wrong CIK does not error, it returns perfectly
+parseable XML from the wrong book. Three of the first 28 resolved by
+company-name search were wrong and looked fine, including a Baupost shell whose
+last 13F was filed in **2002**. `edgar.STALE_QUARTERS` catches the rest.
+
+### Four things that silently corrupt this data
+
+Each was found against live filings, not reasoned about in advance:
+
+| | What happens if you miss it |
+|---|---|
+| Filers differ on XML namespaces (`<n1:infoTable>` vs `<infoTable>`) | A regex parser returns **zero rows** for half your funds, which reads as "holds nothing" rather than as an error |
+| Nearly half of a multi-strat's lines are options (Citadel 47%) | Positions overstated roughly 2x |
+| Convertible-bond CUSIPs match the issuer name | A fund's SNOW convert counts as SNOW equity |
+| Share counts are as-filed; stored closes are back-adjusted | A 25:1 split renders as the manager **adding 2,400%** |
+
+### Cadence, and how it stays quiet
+
+`fetch_13f()` runs inside the normal daily run and almost always makes **no
+network request at all**. A quarter enters the window the day its 45-day
+deadline passes, which forces a sweep because that quarter has no rows yet;
+otherwise EDGAR is re-checked only every `THIRTEENF_RECHECK_DAYS` (7), which is
+what catches amendments and late filers. `run_daily.sh` then re-renders
+`history.html`, since the 13F views are built from the store rather than the
+fetch and would otherwise never show a new quarter.
+
+Two records make the quiet state reachable. A manager that simply did not file
+for a quarter is recorded as `no-filing`, so it counts as settled rather than
+missing forever — without it, Viking Global's absent Q1 and Pershing Square's
+absent Q2 would trigger a full sweep every single day. And
+`data/13f_filings.csv.gz` is a manifest of every filing ever looked at, because
+the position archives cannot carry a filing that reported **no positions**:
+Viking's Q1 2026 information table was empty, and rebuilt from positions alone
+the store would forget it filed and turn its 15 prior holdings into exits that
+never happened.
+
+### The CUSIP map
+
+13F carries a CUSIP and an issuer name but never a ticker, and CUSIP is
+licensed, so there is no free authoritative mapping. `data/cusip_map.csv` is
+built from the filings themselves and then *proved*: a candidate pair is
+accepted only when the price implied by the filers, `median(value / shares)`,
+matches the ticker's close in `history.db`. Ten managers independently agreeing
+that NVDA was $200.09 on 2026-06-30 is strong evidence, and the same check
+catches filers reporting thousands rather than dollars, since they miss by
+exactly 1000x. Every name the roster holds resolves this way, at a median
+price error of **0.0000**.
+
+Rebuild it with `python tools/build_cusip_map.py` after editing `UNIVERSE`,
+then `python build_dashboard.py --rebuild-13f`. Neither touches the network.
+
+### Reading the page
+
+The **% of book** column is the one that matters. It is the position against
+that manager's entire reported equity book, and it separates conviction from
+flow without special-casing: Altimeter's NVDA is 19.2% of book, Citadel's is
+1.4%. Cohort labels reinforce it.
+
+An **absent position is an exit**, which is why `thirteenf_filings` records
+every filing that was successfully ingested. Without it a network failure and a
+liquidation are the same absence. Pershing Square had not filed Q2 2026 as of
+2026-08-20; its Q1 positions correctly render as nothing at all rather than as
+six fabricated exits.
+
+13F is long US equity only — no shorts, no swaps — and is filed 45 days after
+quarter end, so it is always a lagged picture.
+
+---
+
 ## Scheduling
 
 [run_daily.sh](run_daily.sh) is the driver, invoked by the LaunchAgent
@@ -164,14 +265,39 @@ not inherit a shell environment — change that line if the env moves.
 
 ## The universe
 
-148 tickers, defined in `UNIVERSE` at the top of
+153 tickers, defined in `UNIVERSE` at the top of
 [build_dashboard.py](build_dashboard.py). Edit the lists to taste.
 
 | Sector | Tickers | Sub-industries |
 |---|---:|---:|
-| TMT (Tech · Media · Telecom) | 80 | 9 |
-| Industrials | 36 | 6 |
+| TMT (Tech · Media · Telecom) | 81 | 9 |
+| Industrials | 40 | 6 |
 | Consumer (Staples · Discretionary) | 32 | 5 |
+
+### On adding names
+
+Adding a ticker costs nothing in 13F terms. The archives hold the *full*
+information tables, not just universe hits, so a new name picks up its whole
+13F history with no network call:
+
+```bash
+python tools/build_cusip_map.py            # re-resolve, no network
+python build_dashboard.py --rebuild-13f    # re-ingest, no network
+```
+
+Its fundamentals and estimates, though, start from the day it is added. Prices
+and statements are recoverable; forward consensus is not, and Yahoo carries
+about 90 days of it. A name added late is permanently missing that history.
+
+Two things worth checking before adding one. Scoring is a percentile **within
+the sub-industry**, so a name only scores meaningfully against a peer set of
+real size — below about five members the percentile is coarse enough to be
+decorative. And the peer set has to be *comparable*: `Telecom` sits at four
+members and was deliberately left there, because every available US fill is
+distressed or sub-scale (Cable One at $0.1B, Lumen loss-making) against a set
+whose median is $180B. Adding them would have made the percentile worse, not
+better. Where no coherent peer exists, the `PROXY_ETFS` benchmark is doing the
+work instead.
 
 Each sub-industry is benchmarked against the liquid ETF that best stands in for
 it (`PROXY_ETFS`), falling back to the peer median where no clean proxy exists.
@@ -194,6 +320,9 @@ Working documents under [docs/superpowers/](docs/superpowers/):
   — what the yfinance API actually returns, probed against live data.
 - [plans/2026-08-15-fundamentals-history-capture.md](docs/superpowers/plans/2026-08-15-fundamentals-history-capture.md)
   — the implementation plan.
+- [specs/2026-08-20-13f-holdings-design.md](docs/superpowers/specs/2026-08-20-13f-holdings-design.md)
+  — the 13F design, including the evidence probed from live EDGAR and the
+  reasoning behind gzipping the dated CSVs rather than pruning them.
 
 The design doc lists five further sub-projects that build on this one: return
 attribution (`return = re-rating + revision`), delta badges, statement backfill,

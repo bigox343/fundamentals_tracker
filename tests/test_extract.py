@@ -1,3 +1,4 @@
+import gzip
 import json
 from datetime import date
 from pathlib import Path
@@ -415,19 +416,41 @@ def test_write_then_read_estimates_csv_roundtrips(tmp_path, eps_trend, nvda_refs
     assert back == rows
 
 
+def _text(path):
+    """Dated CSVs are written gzipped; read one back as text."""
+    return gzip.decompress(extract.csv_path(path).read_bytes()).decode()
+
+
 def test_estimates_csv_has_a_header(tmp_path, eps_trend, nvda_refs):
     rows = extract.eps_trend_rows("NVDA", eps_trend, AS_OF, nvda_refs)
     path = tmp_path / "estimates_20260815.csv"
     extract.write_estimates_csv(rows, path)
 
-    header = path.read_text().splitlines()[0]
+    header = _text(path).splitlines()[0]
     assert header == ",".join(extract.ESTIMATES_COLUMNS)
 
 
 def test_write_estimates_csv_of_empty_rows_still_writes_header(tmp_path):
     path = tmp_path / "estimates_20260815.csv"
     assert extract.write_estimates_csv([], path) == 0
-    assert path.read_text().strip() == ",".join(extract.ESTIMATES_COLUMNS)
+    assert _text(path).strip() == ",".join(extract.ESTIMATES_COLUMNS)
+
+
+def test_dated_csvs_are_written_compressed(tmp_path):
+    """433 MB/yr of dated CSVs against 54 MB/yr, with nothing pruned."""
+    path = tmp_path / "estimates_20260815.csv"
+    extract.write_estimates_csv([], path)
+    assert (tmp_path / "estimates_20260815.csv.gz").exists()
+    assert not path.exists()
+
+
+def test_a_plain_csv_written_before_the_switch_is_still_read(tmp_path):
+    """Existing files must keep working, or the store cannot be rebuilt."""
+    path = tmp_path / "estimates_20260815.csv"
+    path.write_text(",".join(extract.ESTIMATES_COLUMNS) + "\n"
+                    "NVDA,2026-08-15,estimate,epsEst,2027-01-31,8.95773\n")
+    rows = extract.read_estimates_csv(path)
+    assert len(rows) == 1 and rows[0].value == 8.95773
 
 
 def test_read_estimates_csv_preserves_ref_period_as_text(tmp_path, eps_trend,

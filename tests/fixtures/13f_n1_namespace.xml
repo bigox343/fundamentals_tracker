@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<n1:informationTable xmlns:n1="http://www.sec.gov/edgar/document/thirteenf/informationtable">
+	<n1:infoTable>
+		<n1:nameOfIssuer>1   800  FLOWERS    COM    INC</n1:nameOfIssuer>
+		<n1:titleOfClass>CL     A</n1:titleOfClass>
+		<n1:cusip>68243Q106</n1:cusip>
+		<n1:value>262128</n1:value>
+		<n1:shrsOrPrnAmt>
+			<n1:sshPrnamt>75324</n1:sshPrnamt>
+			<n1:sshPrnamtType>SH</n1:sshPrnamtType>
+		</n1:shrsOrPrnAmt>
+		<n1:investmentDiscretion>SOLE</n1:investmentDiscretion>
+		<n1:votingAuthority>
+			<n1:Sole>75324</n1:Sole>
+			<n1:Shared>0</n1:Shared>
+			<n1:None>0</n1:None>
+		</n1:votingAuthority>
+	</n1:infoTable>
+	<n1:infoTable>
+		<n1:nameOfIssuer>10X   GENOMICS     INC</n1:nameOfIssuer>
+		<n1:titleOfClass>CL     A  COM</n1:titleOfClass>
+		<n1:cusip>88025U109</n1:cusip>
+		<n1:value>4479377</n1:value>
+		<n1:shrsOrPrnAmt>
+			<n1:sshPrnamt>116833</n1:sshPrnamt>
+			<n1:sshPrnamtType>SH</n1:sshPrnamtType>
+		</n1:shrsOrPrnAmt>
+		<n1:investmentDiscretion>SOLE</n1:investmentDiscretion>
+		<n1:votingAuthority>
+			<n1:Sole>116833</n1:Sole>
+			<n1:Shared>0</n1:Shared>
+			<n1:None>0</n1:None>
+		</n1:votingAuthority>
+	</n1:infoTable>
+	<n1:infoTable>
+		<n1:nameOfIssuer>1RT   ACQUISITION       CORP.</n1:nameOfIssuer>
+		<n1:titleOfClass>*W     EXP     06/26/203</n1:titleOfClass>
+		<n1:cusip>G6757R113</n1:cusip>
+		<n1:value>12725</n1:value>
+		<n1:shrsOrPrnAmt>
+			<n1:sshPrnamt>25000</n1:sshPrnamt>
+			<n1:sshPrnamtType>SH</n1:sshPrnamtType>
+		</n1:shrsOrPrnAmt>
+		<n1:putCall>Call</n1:putCall>
+		<n1:investmentDiscretion>SOLE</n1:investmentDiscretion>
+		<n1:votingAuthority>
+			<n1:Sole>0</n1:Sole>
+			<n1:Shared>0</n1:Shared>
+			<n1:None>25000</n1:None>
+		</n1:votingAuthority>
+	</n1:infoTable>
+	<n1:infoTable>
+		<n1:nameOfIssuer>1RT   ACQUISITION       CORP.</n1:nameOfIssuer>
+		<n1:titleOfClass>USD       CL   A  ORD     SHS</n1:titleOfClass>
+		<n1:cusip>G6757R105</n1:cusip>
+		<n1:value>3005300</n1:value>
+		<n1:shrsOrPrnAmt>
+			<n1:sshPrnamt>293200</n1:sshPrnamt>
+			<n1:sshPrnamtType>SH</n1:sshPrnamtType>
+		</n1:shrsOrPrnAmt>
+		<n1:investmentDiscretion>SOLE</n1:investmentDiscretion>
+		<n1:votingAuthority>
+			<n1:Sole>293200</n1:Sole>
+			<n1:Shared>0</n1:Shared>
+			<n1:None>0</n1:None>
+		</n1:votingAuthority>
+	</n1:infoTable>
+</n1:informationTable>

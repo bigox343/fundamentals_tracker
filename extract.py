@@ -322,7 +322,7 @@ def write_estimates_csv(rows: list[MetricRow], path: Path) -> int:
     history.db derived and therefore disposable.
     """
     frame = pd.DataFrame(list(rows), columns=list(ESTIMATES_COLUMNS))
-    frame.to_csv(path, index=False)
+    frame.to_csv(csv_path(path), index=False, compression="gzip")
     return len(rows)
 
 
@@ -335,12 +335,14 @@ def read_estimates_csv(path: Path) -> list[MetricRow]:
     does not equal the one it replaced, which is the property the raw CSVs
     exist to guarantee.
     """
-    frame = pd.read_csv(
-        path,
+    found = open_csv(path)
+    if found is None:
+        raise FileNotFoundError(path)
+    frame = read_csv_any(
+        found,
         dtype={"ticker": str, "as_of": str, "period_type": str,
                "metric": str, "ref_period": str},
         keep_default_na=False,
-        float_precision="round_trip",
     )
     return [
         MetricRow(r["ticker"], r["as_of"], r["period_type"],
@@ -527,14 +529,63 @@ def collect_ownership(tickers: Sequence[str]):
     return holds, ins, failed
 
 
+# The dated CSVs are written compressed. They are extremely repetitive -- only
+# 152 of 11,228 estimate rows change day over day -- so they compress 5.9x blended
+# (estimates 8.8x, insiders 6.3x, fundamentals only 2.2x), taking data/ from
+# 433 MB/yr uncompressed to 73 MB/yr.
+#
+# Compressing rather than pruning is deliberate. Deleting old dated files would
+# not lose data today, since it is all in history.db, but it would delete the
+# rebuild path and invert the guarantee the store rests on: history.db is
+# derived from these files and therefore disposable. Pruned, the database
+# becomes the only copy of the perishable estimate history, which is the one
+# dataset here that cannot be refetched.
+CSV_SUFFIX = ".csv.gz"
+
+
+def csv_path(path: Path) -> Path:
+    """The compressed name for a dated CSV."""
+    path = Path(path)
+    return path if path.name.endswith(".gz") else path.with_suffix(".csv.gz")
+
+
+def open_csv(path: Path) -> Path | None:
+    """Find a dated CSV whether it was written compressed or plain.
+
+    Files written before the switch stay readable, so no migration is required
+    for the store to rebuild.
+    """
+    path = Path(path)
+    for candidate in (csv_path(path), path.with_suffix(".csv")):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def read_csv_any(path: Path, **kwargs):
+    """Read a dated CSV in either form, always with exact float round-trip.
+
+    float_precision="round_trip" is load-bearing: the default parser is fast
+    rather than exact and turns a written 1.9626000000000001 back into 1.9626,
+    which means a rebuilt store does not equal the one it replaced -- the one
+    property these raw files exist to guarantee.
+    """
+    kwargs.setdefault("float_precision", "round_trip")
+    return pd.read_csv(path, **kwargs)
+
+
 def write_rows_csv(rows, columns, path: Path) -> int:
     """Durable record for a table-shaped capture (holdings, insider filings)."""
-    pd.DataFrame(list(rows), columns=list(columns)).to_csv(path, index=False)
+    pd.DataFrame(list(rows), columns=list(columns)).to_csv(
+        csv_path(path), index=False, compression="gzip")
     return len(rows)
 
 
 def read_rows_csv(path: Path, factory, columns):
-    frame = pd.read_csv(path, keep_default_na=False, float_precision="round_trip")
+    found = open_csv(path)
+    if found is None:
+        raise FileNotFoundError(path)
+    frame = read_csv_any(found, keep_default_na=False)
     out = []
     for rec in frame.to_dict("records"):
         vals = []
