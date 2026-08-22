@@ -6,6 +6,8 @@ knowledge lives.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 import pandas as pd
 
@@ -186,3 +188,84 @@ def build_alpha(conn, as_of: str, universe: list[str],
         "insider": zscore(insider_signal(conn, as_of).reindex(universe).dropna()),
     }
     return blend(legs, universe)
+
+
+# --------------------------------------------------------------------------- #
+# Factor risk model                                                            #
+# --------------------------------------------------------------------------- #
+FF_FACTORS = ["Mkt-RF", "SMB", "HML", "RMW", "CMA", "UMD"]
+VAR_FLOOR = 1e-8              # no name is riskless
+TRADING_DAYS = 252
+
+
+class RiskModel(NamedTuple):
+    """Sigma = B F B' + D, with the pieces kept separate.
+
+    This tuple is the substitution seam: a commercial vendor model, or a PCA
+    alternative, can be dropped in here without the optimizer changing.
+    """
+    B: pd.DataFrame           # tickers x factors
+    F: np.ndarray             # factors x factors
+    D: np.ndarray             # per-ticker specific variance
+    tickers: list[str]
+    factor_names: list[str]
+
+
+def sector_factors(rets: pd.DataFrame, sectors: pd.Series,
+                   base: str | None = None) -> pd.DataFrame:
+    """Universe-relative sector return series, one column short of the sectors.
+
+    Raw sector returns correlate ~0.9 with the market, so regressing on both
+    gives unstable loadings; subtracting the universe mean removes most of
+    that. The relative series are near-collinear by construction, so one
+    sector is dropped and absorbed into the intercept.
+
+    `base` defaults to the alphabetically first sector rather than a hardcoded
+    label. Matching on a fixed string is how this silently returned all three
+    columns: the store's sectors are full labels like
+    "Consumer (Staples - Discretionary)", not the bare word they start with.
+    """
+    universe_mean = rets.mean(axis=1)
+    present = sorted(set(sectors.reindex(rets.columns).dropna()))
+    if base is None and present:
+        base = present[0]
+    names = [s for s in present if s != base]
+    columns = {}
+    for sector in names:
+        members = [t for t in rets.columns if sectors.get(t) == sector]
+        if members:
+            columns[f"SEC_{sector}"] = rets[members].mean(axis=1) - universe_mean
+    return pd.DataFrame(columns, index=rets.index)
+
+
+def estimate_risk(rets: pd.DataFrame, factor_returns: pd.DataFrame,
+                  sectors: pd.Series, min_obs: int = MIN_OBS) -> RiskModel:
+    """B by time-series regression, F from factor history, D from residuals."""
+    ff = factor_returns.reindex(rets.index)[FF_FACTORS]
+    panel = pd.concat([ff, sector_factors(rets, sectors)], axis=1).dropna()
+    if panel.empty:
+        raise ValueError("no overlap between returns and factor history")
+    aligned = rets.loc[panel.index]
+
+    X = np.column_stack([np.ones(len(panel)), panel.values])
+    tickers, loadings, specific = [], [], []
+
+    for ticker in aligned.columns:
+        y = aligned[ticker]
+        mask = y.notna().values
+        if mask.sum() < min(min_obs, len(panel)):
+            continue
+        coef, *_ = np.linalg.lstsq(X[mask], y.values[mask], rcond=None)
+        residual = y.values[mask] - X[mask] @ coef
+        tickers.append(ticker)
+        loadings.append(coef[1:])                     # drop the intercept
+        specific.append(max(residual.var(ddof=1), VAR_FLOOR) * TRADING_DAYS)
+
+    B = pd.DataFrame(loadings, index=tickers, columns=panel.columns)
+    F = np.cov(panel.values.T) * TRADING_DAYS
+    return RiskModel(B, F, np.array(specific), tickers, list(panel.columns))
+
+
+def covariance(rm: RiskModel) -> np.ndarray:
+    """Sigma = B F B' + D, positive-definite by construction."""
+    return rm.B.values @ rm.F @ rm.B.values.T + np.diag(rm.D)
