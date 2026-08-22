@@ -6,7 +6,10 @@ knowledge lives.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import NamedTuple
+
+import cvxpy as cp
 
 import numpy as np
 import pandas as pd
@@ -269,3 +272,82 @@ def estimate_risk(rets: pd.DataFrame, factor_returns: pd.DataFrame,
 def covariance(rm: RiskModel) -> np.ndarray:
     """Sigma = B F B' + D, positive-definite by construction."""
     return rm.B.values @ rm.F @ rm.B.values.T + np.diag(rm.D)
+
+
+# --------------------------------------------------------------------------- #
+# Optimization                                                                 #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class OptimizerConfig:
+    vol_target: float = 0.08          # annualized
+    gross_cap: float = 2.0
+    position_cap: float = 0.04
+    subindustry_band: float = 0.10
+    turnover_penalty: float = 0.001
+
+
+class Solution(NamedTuple):
+    weights: pd.Series
+    status: str                       # 'optimal' | 'relaxed:...' | 'infeasible'
+    relaxations: list[str]
+
+
+def _masks(index, labels: pd.Series) -> list[np.ndarray]:
+    out = []
+    for value in sorted(set(labels.reindex(index).dropna())):
+        out.append(np.array([1.0 if labels.get(t) == value else 0.0
+                             for t in index]))
+    return out
+
+
+def _problem(mu, cov, B, sector_masks, subind_masks, prev, cfg):
+    """Assemble the cvxpy problem.
+
+    Split out so the relaxation ladder can rebuild it with a loosened config
+    rather than mutating a solved problem in place.
+    """
+    n = len(mu)
+    w = cp.Variable(n)
+
+    objective = mu.values @ w
+    if prev is not None and cfg.turnover_penalty > 0:
+        objective = objective - cfg.turnover_penalty * cp.norm1(w - prev.values)
+
+    constraints = [
+        cp.sum(w) == 0,                                    # dollar neutral
+        B.values.T @ w == 0,                               # factor neutral
+        cp.quad_form(w, cp.psd_wrap(cov)) <= cfg.vol_target ** 2,
+        cp.norm1(w) <= cfg.gross_cap,
+        cp.abs(w) <= cfg.position_cap,
+    ]
+    for mask in sector_masks:
+        constraints.append(mask @ w == 0)                  # sector neutral
+    for mask in subind_masks:
+        constraints.append(cp.abs(mask @ w) <= cfg.subindustry_band)
+
+    return w, cp.Problem(cp.Maximize(objective), constraints)
+
+
+def solve(mu: pd.Series, rm: RiskModel, sectors: pd.Series,
+          subindustry: pd.Series, prev: pd.Series | None = None,
+          config: OptimizerConfig | None = None) -> Solution:
+    """Solve for target weights, relaxing in a documented order if infeasible."""
+    cfg = OptimizerConfig() if config is None else config
+    mu = mu.reindex(rm.tickers).fillna(0.0)
+    cov = covariance(rm)
+    prev = None if prev is None else prev.reindex(rm.tickers).fillna(0.0)
+
+    sector_masks = _masks(rm.tickers, sectors)
+    subind_masks = _masks(rm.tickers, subindustry)
+
+    w, problem = _problem(mu, cov, rm.B, sector_masks, subind_masks, prev, cfg)
+    problem.solve()
+
+    if problem.status in ("optimal", "optimal_inaccurate"):
+        return Solution(pd.Series(w.value, index=rm.tickers), "optimal", [])
+
+    return _relax(mu, cov, rm, sector_masks, subind_masks, prev, cfg)
+
+
+def _relax(mu, cov, rm, sector_masks, subind_masks, prev, cfg) -> Solution:
+    raise NotImplementedError
