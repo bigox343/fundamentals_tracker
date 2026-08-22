@@ -147,6 +147,19 @@ CREATE TABLE IF NOT EXISTS thirteenf_filings (
   PRIMARY KEY (cik, quarter)
 );
 
+CREATE TABLE IF NOT EXISTS target_weights (
+  ticker            TEXT NOT NULL,
+  as_of             TEXT NOT NULL,
+  weight            REAL NOT NULL,
+  mu                REAL,            -- blended alpha score, z-score units
+  contrib_momentum  REAL,            -- per-leg split of `mu`. Stored because
+  contrib_13f       REAL,            -- the forward record has to answer "which
+  contrib_insider   REAL,            -- leg worked", not only "did it work".
+  solver_status     TEXT NOT NULL,   -- 'optimal' | 'relaxed:...' | 'infeasible'
+  ingested_at       TEXT NOT NULL,
+  PRIMARY KEY (as_of, ticker)
+);
+
 CREATE INDEX IF NOT EXISTS idx_metric_series ON metrics (ticker, metric, as_of);
 CREATE INDEX IF NOT EXISTS idx_metric_xsec   ON metrics (metric, as_of);
 CREATE INDEX IF NOT EXISTS idx_holdings      ON holdings (ticker, kind, as_of);
@@ -903,3 +916,62 @@ def finish_run(
         (_now(), status, int(tickers_ok), int(tickers_failed), run_id),
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Target weights                                                              #
+# --------------------------------------------------------------------------- #
+class TargetWeightRow(NamedTuple):
+    """One name's target weight on one date, with its alpha attribution.
+
+    Per-leg contributions are stored rather than just the blended `mu`,
+    because the forward record has to answer "which leg worked", not only
+    "did the book work". Recovering the split afterwards is impossible.
+    """
+    as_of: str
+    ticker: str
+    weight: float
+    mu: float | None
+    contrib_momentum: float | None
+    contrib_13f: float | None
+    contrib_insider: float | None
+    solver_status: str
+
+
+_TARGET_WEIGHT_SQL = """
+INSERT INTO target_weights
+    (ticker, as_of, weight, mu, contrib_momentum, contrib_13f,
+     contrib_insider, solver_status, ingested_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(as_of, ticker) DO UPDATE SET
+    weight = excluded.weight,
+    mu = excluded.mu,
+    contrib_momentum = excluded.contrib_momentum,
+    contrib_13f = excluded.contrib_13f,
+    contrib_insider = excluded.contrib_insider,
+    solver_status = excluded.solver_status,
+    ingested_at = excluded.ingested_at
+"""
+
+
+def upsert_target_weights(conn: sqlite3.Connection,
+                          rows: Iterable[TargetWeightRow]) -> int:
+    """Record one day's book. Re-solving a date replaces it, never duplicates."""
+    stamp = _now()
+    payload = [(r.ticker, r.as_of, float(r.weight), _opt(r.mu),
+                _opt(r.contrib_momentum), _opt(r.contrib_13f),
+                _opt(r.contrib_insider), r.solver_status, stamp)
+               for r in rows]
+    if not payload:
+        return 0
+    conn.executemany(_TARGET_WEIGHT_SQL, payload)
+    conn.commit()
+    return len(payload)
+
+
+def target_weights(conn: sqlite3.Connection, as_of: str) -> pd.DataFrame:
+    """The recorded book for one date, heaviest long first."""
+    return pd.read_sql_query(
+        "SELECT ticker, as_of, weight, mu, contrib_momentum, contrib_13f, "
+        "contrib_insider, solver_status FROM target_weights "
+        "WHERE as_of = ? ORDER BY weight DESC", conn, params=[as_of])
