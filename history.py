@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at   TEXT,
   status        TEXT,
   tickers_ok    INTEGER,
-  tickers_failed INTEGER
+  tickers_failed INTEGER,
+  -- Price coverage is tracked apart from tickers_ok because the two fail
+  -- independently: on 2026-08-28 every .info succeeded and 45 of 153 closes
+  -- did not, and the run still recorded 'ok'.
+  closes_ok      INTEGER,
+  closes_expected INTEGER
 );
 
 -- Ownership does not fit MetricRow: a row is keyed by *who* holds the stock, not
@@ -186,8 +191,22 @@ def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+# Columns added to `runs` after the store was already live. CREATE TABLE IF NOT
+# EXISTS cannot add them, and the existing rows are worth keeping -- `runs` is
+# the one table no rebuild can reconstruct, since it records what happened
+# during a fetch rather than anything the CSVs hold.
+_RUNS_ADDED_COLUMNS = (
+    ("closes_ok", "INTEGER"),
+    ("closes_expected", "INTEGER"),
+)
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    for name, decl in _RUNS_ADDED_COLUMNS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
     conn.commit()
 
 
@@ -898,22 +917,56 @@ def start_run(conn: sqlite3.Connection) -> str:
     return run_id
 
 
+# Below this share of the universe, a run is reporting prices it did not get.
+# Not 1.0: a name can be legitimately dead -- EA carries 6 closes in the last 60
+# sessions -- and exact equality would mark every run partial forever. 5% of 153
+# is ~7 names, well clear of both that floor and the 18-45 lost to the fd-limit
+# failures this threshold exists to catch.
+PARTIAL_CLOSE_RATIO = 0.95
+
+
+def latest_close_coverage(closes) -> int:
+    """How many tickers carry a price in the newest session of `closes`.
+
+    Measured on the last row rather than against the run date: a run on a
+    holiday legitimately sees the prior session, and the question here is how
+    many names came back, not which day they came back for.
+    """
+    if closes is None or getattr(closes, "empty", True):
+        return 0
+    return int(closes.iloc[-1].notna().sum())
+
+
 def finish_run(
     conn: sqlite3.Connection,
     run_id: str,
     status: str,
     tickers_ok: int,
     tickers_failed: int,
+    closes_ok: int | None = None,
+    closes_expected: int | None = None,
 ) -> None:
     """Close out a run so gaps stay diagnosable.
 
     Without this, a failed run, a market holiday and a delisting all look
     identical in the data: an absent row.
+
+    A run that fetched every company but lost a third of its prices is degraded,
+    not clean, so `status` is downgraded to 'partial' on the price count. The
+    downgrade only ever applies to 'ok' -- 'failed' is already the worse verdict
+    and must not be softened by a coverage number that happened to clear.
     """
+    if (status == "ok" and closes_expected
+            and closes_ok is not None
+            and closes_ok < PARTIAL_CLOSE_RATIO * closes_expected):
+        status = "partial"
     conn.execute(
         "UPDATE runs SET finished_at = ?, status = ?, tickers_ok = ?, "
-        "tickers_failed = ? WHERE run_id = ?",
-        (_now(), status, int(tickers_ok), int(tickers_failed), run_id),
+        "tickers_failed = ?, closes_ok = ?, closes_expected = ? "
+        "WHERE run_id = ?",
+        (_now(), status, int(tickers_ok), int(tickers_failed),
+         None if closes_ok is None else int(closes_ok),
+         None if closes_expected is None else int(closes_expected), run_id),
     )
     conn.commit()
 

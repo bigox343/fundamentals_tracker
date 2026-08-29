@@ -466,6 +466,103 @@ def test_run_ids_are_unique(conn):
 
 
 # --------------------------------------------------------------------------- #
+# price coverage                                                               #
+# --------------------------------------------------------------------------- #
+# A run that stored 108 of 153 closes and a clean run were indistinguishable in
+# the record: both wrote status 'ok'. The cause was environmental (the fd limit
+# starved yfinance's thread pool), which is exactly the class of failure that
+# comes back silently, so the shortfall is recorded rather than inferred.
+
+def _closes(cols_with_price, cols_without=()):
+    """A two-session close frame; `cols_without` are NaN on the last session."""
+    idx = pd.to_datetime(["2026-08-27", "2026-08-28"])
+    data = {c: [1.0, 1.0] for c in cols_with_price}
+    data.update({c: [1.0, float("nan")] for c in cols_without})
+    return pd.DataFrame(data, index=idx)
+
+
+def test_latest_close_coverage_counts_the_newest_session():
+    frame = _closes(["AAPL", "MSFT"], ["NVDA"])
+    assert history.latest_close_coverage(frame) == 2
+
+
+def test_latest_close_coverage_of_an_empty_frame_is_zero():
+    assert history.latest_close_coverage(pd.DataFrame()) == 0
+    assert history.latest_close_coverage(None) == 0
+
+
+def test_finish_run_records_close_coverage(conn):
+    run_id = history.start_run(conn)
+    history.finish_run(conn, run_id, "ok", tickers_ok=153, tickers_failed=0,
+                       closes_ok=153, closes_expected=153)
+    row = conn.execute(
+        "SELECT status, closes_ok, closes_expected FROM runs WHERE run_id = ?",
+        (run_id,)).fetchone()
+    assert row == ("ok", 153, 153)
+
+
+def test_finish_run_flags_a_partial_price_run(conn):
+    """The 2026-08-28 shape: every .info succeeded, a third of prices did not."""
+    run_id = history.start_run(conn)
+    history.finish_run(conn, run_id, "ok", tickers_ok=153, tickers_failed=0,
+                       closes_ok=108, closes_expected=153)
+    row = conn.execute(
+        "SELECT status, closes_ok FROM runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    assert row[0] == "partial"
+    assert row[1] == 108
+
+
+def test_finish_run_tolerates_a_few_permanently_dead_names(conn):
+    """EA carries 6 closes in 60 sessions. A real gap, but not a broken run."""
+    run_id = history.start_run(conn)
+    history.finish_run(conn, run_id, "ok", tickers_ok=153, tickers_failed=0,
+                       closes_ok=151, closes_expected=153)
+    status = conn.execute(
+        "SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
+    assert status == "ok"
+
+
+def test_finish_run_does_not_upgrade_a_failed_run(conn):
+    """'partial' is a downgrade from 'ok', never a softening of 'failed'."""
+    run_id = history.start_run(conn)
+    history.finish_run(conn, run_id, "failed", tickers_ok=0, tickers_failed=153,
+                       closes_ok=0, closes_expected=153)
+    status = conn.execute(
+        "SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
+    assert status == "failed"
+
+
+def test_finish_run_without_coverage_is_unchanged(conn):
+    """The old call signature still works and leaves the columns NULL."""
+    run_id = history.start_run(conn)
+    history.finish_run(conn, run_id, "ok", tickers_ok=147, tickers_failed=1)
+    row = conn.execute(
+        "SELECT status, closes_ok, closes_expected FROM runs WHERE run_id = ?",
+        (run_id,)).fetchone()
+    assert row == ("ok", None, None)
+
+
+def test_ensure_schema_adds_coverage_columns_to_an_older_store():
+    """The live store predates these columns and holds runs worth keeping."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE runs (
+          run_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT,
+          status TEXT, tickers_ok INTEGER, tickers_failed INTEGER
+        );
+        INSERT INTO runs VALUES ('old', 's', 'f', 'ok', 148, 0);
+    """)
+    history.ensure_schema(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(runs)")}
+    assert {"closes_ok", "closes_expected"} <= cols
+    assert c.execute("SELECT tickers_ok FROM runs WHERE run_id='old'"
+                     ).fetchone()[0] == 148
+    history.ensure_schema(c)  # migration must be idempotent
+    c.close()
+
+
+# --------------------------------------------------------------------------- #
 # ownership                                                                    #
 # --------------------------------------------------------------------------- #
 

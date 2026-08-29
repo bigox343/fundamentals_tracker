@@ -69,7 +69,10 @@ run_daily.sh
         ├── record_history()  ──►  data/history.db
         └── render_html()     ──►  dashboard.html
   ├── visualize.py            ──►  history.html
-  └── tools/build_13f_report.py ──► reports/13f_YYYYQN.html
+  ├── tools/build_13f_report.py ──► reports/13f_YYYYQN.html
+  └── tools/build_portfolio_report.py
+        ├── data/history.db (target_weights)
+        └── reports/portfolio_YYYYMMDD.html
 ```
 
 `record_history()` is deliberately non-fatal: a store failure must not cost you
@@ -140,6 +143,14 @@ PRIMARY KEY (ticker, as_of, period_type, metric, ref_period)
 otherwise. Alongside it sit `companies` (name, sector, sub-industry) and `runs`,
 which records each run's status and ticker counts — without it, a failed run, a
 market holiday and a delisting all look identical in the data: an absent row.
+
+`runs` counts fetched companies and stored closes **separately**, because they
+fail separately. On 2026-08-28 every one of the 153 `.info` pulls succeeded and
+only 108 closes landed, and the run still recorded `ok, 153`. A run whose price
+coverage falls below `history.PARTIAL_CLOSE_RATIO` of the universe is now
+recorded as `partial` rather than `ok`. The threshold is 0.95 rather than 1.0
+because a name can be legitimately dead — EA carries 6 closes in 60 sessions —
+and exact equality would mark every run partial forever.
 
 ### Three invariants worth knowing before you edit
 
@@ -266,6 +277,34 @@ It appends to `logs/run.log`, trimming to the last 2000 lines so the log cannot
 grow without bound. `logs/` is gitignored. The script hardcodes its interpreter
 (`/Users/owen/opt/anaconda3/envs/py312/bin/python3`) because a LaunchAgent does
 not inherit a shell environment — change that line if the env moves.
+
+### The file-descriptor limit is load-bearing
+
+The plist sets `SoftResourceLimits / NumberOfFiles` to 4096. **Do not drop it.**
+
+`yf.download(threads=True)` runs a thread pool in which every worker holds an
+HTTPS socket *and* a SQLite connection to yfinance's own tz cache. launchd's
+default soft limit is 256 — a quarter of what a 153-ticker pull needs — so the
+run exhausted its descriptors partway through and yfinance reported the
+casualties two different ways:
+
+```
+OperationalError('unable to open database file')     # the SQLite side
+$AAPL: possibly delisted; no price data found        # the socket side
+```
+
+Neither message mentions descriptors, and the affected tickers differ every run,
+because it is a resource race rather than anything about the data. AAPL was not
+delisted. Reproduced by varying only `ulimit -n` against the same 153 symbols:
+
+| `ulimit -n` | Result |
+|---:|---|
+| 1048576 (interactive shell) | 153/153, no errors |
+| 256 (launchd default) | 150/153, false "possibly delisted" |
+| 96 (emulating the run's other open files) | `unable to open database file` |
+
+This is why price coverage is recorded per run rather than assumed: the failure
+is environmental, silent, and costs a third of the universe when it returns.
 
 ---
 

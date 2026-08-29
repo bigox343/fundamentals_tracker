@@ -40,6 +40,13 @@ if [ $status -eq 0 ]; then
     || echo "visualize FAILED (dashboard and store are unaffected)" >> "$LOG"
   "$PYTHON" tools/build_13f_report.py >> "$LOG" 2>&1 \
     || echo "13F report FAILED (dashboard and store are unaffected)" >> "$LOG"
+  # The book is solved from the store, so it must run after the fetch -- and it
+  # must run *every* day: target_weights is the only out-of-sample record of
+  # what the model actually held, and a day not solved is a day the forward
+  # evidence does not have. Non-fatal for the same reason as the reports above:
+  # cvxpy failing to converge must not cost you the dashboard or the store.
+  "$PYTHON" tools/build_portfolio_report.py >> "$LOG" 2>&1 \
+    || echo "portfolio report FAILED (dashboard and store are unaffected)" >> "$LOG"
 fi
 
 if [ $status -eq 0 ]; then

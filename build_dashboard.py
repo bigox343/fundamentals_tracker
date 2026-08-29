@@ -1298,11 +1298,17 @@ def record_history(df, closes, est_rows, as_of, failed, own=None):
             holds, ins = own
             written += history.upsert_holdings(conn, holds)
             written += history.upsert_insiders(conn, ins)
+        closes_ok = history.latest_close_coverage(closes)
         history.finish_run(
             conn, run_id, "ok",
             tickers_ok=len(df) - len(failed), tickers_failed=len(failed),
+            closes_ok=closes_ok, closes_expected=len(df),
         )
-        print(f"History: {written} rows written for {as_of}")
+        print(f"History: {written} rows written for {as_of} "
+              f"({closes_ok}/{len(df)} closes)")
+        if closes_ok < history.PARTIAL_CLOSE_RATIO * len(df):
+            print(f"  WARNING: only {closes_ok} of {len(df)} closes landed; "
+                  f"run recorded as partial", file=sys.stderr)
     finally:
         conn.close()
 
