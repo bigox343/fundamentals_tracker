@@ -33,7 +33,7 @@ def test_excluding_them_repairs_the_rest_of_the_band():
 
 def test_net_debt_ebitda_keys_off_the_ebitda_sign_not_its_own():
     # BA: ~$50B net debt against negative EBITDA renders as -10.02, which reads
-    # as net cash. GD's 0.78 and RTX's 2.05 are real, positive-EBITDA ratios.
+    # as net cash. GD's 0.78 and RTX's 1.92 are real, positive-EBITDA ratios.
     # RTX is added beyond the brief's 3-name fixture solely to clear
     # relative_scores' pre-existing `len(valid) < 3` floor (predates this task,
     # present since the initial commit): with only BA/GD/HWM, excluding BA
@@ -41,13 +41,23 @@ def test_net_debt_ebitda_keys_off_the_ebitda_sign_not_its_own():
     # domain fix, which would make this test unable to observe the behavior
     # under test. The real Aerospace & Defense band has 8 names (BA, RTX, LMT,
     # GD, NOC, LHX, TDG, HWM), so this never happens in production.
-    df = pd.DataFrame({"netDebtEbitda": [-10.02, 0.78, 1.47, 2.05],
-                       "evEbitda": [-67.40, 15.68, 38.65, 19.30]},
-                      index=["BA", "GD", "HWM", "RTX"])
+    #
+    # MDB is the discriminating row: -170.08 over its *own* column reads as
+    # a bad ratio, but its EBITDA (2065.37) is positive, so -170.08 is a real
+    # net-cash position and must keep scoring. A domain keyed off
+    # netDebtEbitda's own sign (the bug being guarded against) would exclude
+    # MDB right alongside BA; only keying off evEbitda's sign tells them apart.
+    # Without this row, BA and GD alone can't catch that regression: BA's own
+    # netDebtEbitda (-10.02) happens to share evEbitda's sign, so a domain
+    # keyed off either column excludes it and the test passes either way.
+    df = pd.DataFrame({"netDebtEbitda": [-10.02, 0.78, 1.47, 1.92, -170.08],
+                       "evEbitda": [-67.40, 15.68, 38.65, 19.17, 2065.37]},
+                      index=["BA", "GD", "HWM", "RTX", "MDB"])
     scores = bd.relative_scores(df, "netDebtEbitda", False,
                                 bd.DOMAINS["netDebtEbitda"])
     assert "BA" not in scores
     assert "GD" in scores
+    assert "MDB" in scores
 
 
 def test_a_genuinely_negative_metric_is_still_scored():
