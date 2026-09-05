@@ -212,6 +212,12 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
             key: relative_scores(sdf, key, hb, domains.get(key))
             for key, _l, _g, _f, hb in metrics if hb is not None
         }
+        # evaluated per-band, not per-cell, so it lines up with sub_scores'
+        # own frame (sdf) rather than the whole sector
+        sub_domain = {
+            key: domains[key](sdf) for key, _l, _g, _f, _hb in metrics
+            if key in domains
+        }
         thin = " thin" if len(sdf) < 3 else ""
         note = " <span class='thin-note'>(thin peer set — no tint)</span>" if thin else ""
         body += (f"<tr class='subhead{thin}' data-sub=\"{sub}\">"
@@ -238,8 +244,26 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                     attrs += f" data-ss='{ss:.4f}'"
                 if sc is not None:
                     attrs += f" data-sc='{sc:.4f}'"
+                # A missing score is ambiguous on its own: test_domains.py's
+                # 3-name band (-5.0, -3.0, 12.0) excludes the two negatives,
+                # leaving one valid value under relative_scores' floor of
+                # three, so *all three* come back with ss=None -- including
+                # 12.0, which is perfectly well-defined. Checking the domain
+                # predicate on this row directly (sub_domain), rather than
+                # inferring "out of domain" from the absent score, is what
+                # keeps 12.0 unmarked while -5.0 and -3.0 still get flagged.
+                cls = f"num g-{g}"
+                dom_row = sub_domain.get(key)
+                if (ss is None and dom_row is not None
+                        and isinstance(v, (int, float))
+                        and not (isinstance(v, float) and math.isnan(v))
+                        and not bool(dom_row.get(tk, True))):
+                    cls += " undef"
+                    attrs += (" title=\"Denominator is zero or negative — "
+                              "this ratio is undefined and is excluded from "
+                              "peer scoring\"")
                 cell = spark_cell(r) if f == "spark" else fmt(v, f)
-                body += f"<td class='num g-{g}'{attrs}{cell_style(ss)}>{cell}</td>"
+                body += f"<td class='{cls}'{attrs}{cell_style(ss)}>{cell}</td>"
             body += "</tr>"
 
     return f"""
@@ -426,6 +450,7 @@ td.name{text-align:left;min-width:150px;}
 .tk{font-weight:700;display:block;}
 .nm{color:var(--muted);font-size:11px;display:block;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
 .na{color:var(--muted);}
+td.undef{color:var(--muted);font-style:italic;opacity:.65;cursor:help;}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0 8px;}
 .tile{background:var(--page);border:1px solid var(--ring);border-radius:10px;padding:12px 14px;}
 .tl{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
