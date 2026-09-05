@@ -300,12 +300,34 @@ Four traps. Each silently produces a wrong series rather than an error:
 | Each period-end carries both a year-to-date and a three-month fact | TTM double-counts. AAPL's 2026-03-28 holds both `4.85` and `2.01`; they are distinguishable only by `period_end - period_start` |
 | A 10-K carries no Q4 fact, only the annual figure | Every Q4 is a hole, or TTM silently spans five quarters. Q4 must be reconstructed as `FY - (Q1+Q2+Q3)` |
 | Filers tag revenue three different ways | Mixing tags mid-series renders as a fake revision. Choose one chain member per ticker — the one with the most facts — and hold it fixed for that ticker's whole series |
-| **Reported EPS is not split-adjusted; stored closes are back-adjusted** | NVDA's 2024 10:1 split makes every pre-split P/E read **10x too high** |
+| **Reported per-share figures are as-filed; stored closes are back-adjusted** | NVDA's 2024 10:1 split makes every pre-split P/E read **10x too high** |
+| **The stored close is dividend-adjusted; a historical market cap must not be** | Every past multiple reads too cheap, biased by yield. Measured over 5 years: VZ 37.2%, IBM 21.1%, KO 15.9%, PG 13.7%, MSFT 4.2% |
 
-The last is this repo's 13F lesson in a new dataset — *"share counts are
-as-filed; stored closes are back-adjusted; a 25:1 split renders as the manager
-adding 2,400%"*. `history.split_ratios` and `history._snap_split` already exist
-for it and are reused.
+The first of those two is this repo's 13F lesson in a new dataset — *"share
+counts are as-filed; stored closes are back-adjusted; a 25:1 split renders as
+the manager adding 2,400%"*.
+
+Both are avoided by one decision: **build every multiple from aggregates, never
+from per-share figures.** A dollar total — net income, revenue, EBITDA, free
+cash flow — carries no share basis and so cannot be corrupted by a split. The
+share basis then enters exactly once, in the market cap:
+
+    market cap(d) = closeRaw(d) x shares_split_adjusted(d)
+
+`closeRaw` is a new daily metric: yfinance's `Close` under `auto_adjust=False`,
+which is split-adjusted but **not** dividend-adjusted. The existing `close`
+metric stays exactly as it is and continues to serve returns and sparklines,
+where dividend adjustment is correct.
+
+Share counts from XBRL are as-filed and therefore do need adjusting. The factor
+is recoverable from the data already being fetched: a split appears as a
+near-integer jump in `WeightedAverageNumberOfDilutedSharesOutstanding` between
+consecutive quarters, and `history._snap_split` — which exists for precisely
+this snapping in the 13F path — is reused to round it.
+
+Trailing P/E is therefore `market cap / TTM NetIncomeLoss`, not
+`close / TTM EPS`. `EarningsPerShareDiluted` is still fetched, but only as an
+independent cross-check in the §6 proof harness.
 
 Metrics produced, and the concepts each is built from:
 
