@@ -252,6 +252,41 @@ GROUP_LABELS = {
 
 
 # --------------------------------------------------------------------------- #
+# Scoring domains                                                              #
+# --------------------------------------------------------------------------- #
+# A ratio whose denominator is zero or negative is not an extreme value, it is
+# an absent one, and relative_scores() cannot tell the difference: a negative
+# EV/EBITDA lands far below the band median, clips to -1.0, and is negated by
+# higher_better=False into +1.0 -- the most favorable score on the scale. NET
+# rendered as the cheapest name in Software — Infrastructure on -27,888x.
+#
+# Excluding these also repairs the rest of the band, because med and mad are
+# computed over the surviving values. Dropping NET and SNOW moved that band's
+# median from 94.13 to 303.90 and every remaining name by ~0.49 of scale.
+#
+# Each entry maps a metric to a predicate over the whole frame, because one of
+# them needs a second column: net debt over a *negative* EBITDA is negative,
+# which reads as net cash, so netDebtEbitda's domain keys off the sign of
+# evEbitda rather than its own. Boeing, ~$50B net debt against negative EBITDA,
+# scored 1.00 -- the safest balance sheet in Aerospace & Defense.
+#
+# Not guarded, deliberately: a large negative ND/EBITDA arising from a small but
+# *positive* EBITDA (MDB at -170x) is a real ratio describing a real net cash
+# position. The clip already bounds it.
+def _positive(key: str):
+    return lambda df: pd.to_numeric(df[key], errors="coerce") > 0
+
+
+DOMAINS: dict = {
+    "forwardPE":     _positive("forwardPE"),
+    "trailingPE":    _positive("trailingPE"),
+    "evEbitda":      _positive("evEbitda"),
+    "ps":            _positive("ps"),
+    "netDebtEbitda": _positive("evEbitda"),
+}
+
+
+# --------------------------------------------------------------------------- #
 # Data pull                                                                    #
 # --------------------------------------------------------------------------- #
 def _pct(x):
@@ -791,7 +826,8 @@ def _run(args):
     print("Fetching proxy-ETF benchmarks...")
     proxies = fetch_proxies(df)
 
-    html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS)
+    html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS,
+                              DOMAINS)
     out = ROOT / "dashboard.html"
     out.write_text(html, encoding="utf-8")
     print(f"\nWrote {out}  ({len(df)} companies)")

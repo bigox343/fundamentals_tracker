@@ -112,11 +112,19 @@ def cell_style(score: float | None) -> str:
     return f" style=\"background:rgba({rgb},{a:.3f})\""
 
 
-def relative_scores(df: pd.DataFrame, key: str, higher_better: bool | None) -> dict:
-    """Signed z-ish score per row within a sector, clipped to [-1,1]."""
+def relative_scores(df: pd.DataFrame, key: str, higher_better: bool | None,
+                    domain=None) -> dict:
+    """Signed z-ish score per row within a sector, clipped to [-1,1].
+
+    `domain` is a predicate over the frame marking which rows carry a
+    *meaningful* value. Rows outside it are dropped before med/mad are taken,
+    so an undefined ratio neither scores itself nor shifts its peers.
+    """
     if higher_better is None:
         return {}
     col = pd.to_numeric(df[key], errors="coerce")
+    if domain is not None:
+        col = col.where(domain(df))
     valid = col.dropna()
     if len(valid) < 3:
         return {}
@@ -160,7 +168,8 @@ def band_perf(band: str, proxies: dict) -> str:
 
 
 def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
-                   metrics: list, universe: dict, group_labels: dict) -> str:
+                   metrics: list, universe: dict, group_labels: dict,
+                   domains: dict) -> str:
     gcount = {}
     for _k, _l, g, _f, _hb in metrics:
         gcount[g] = gcount.get(g, 0) + 1
@@ -186,7 +195,7 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
     # side; the JS toggle swaps which basis paints the cell
     tdf = df.set_index("ticker", drop=False)
     sec_scores = {
-        key: relative_scores(tdf, key, hb)
+        key: relative_scores(tdf, key, hb, domains.get(key))
         for key, _l, _g, _f, hb in metrics if hb is not None
     }
 
@@ -200,7 +209,7 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
             continue
         sdf = sdf.sort_values("marketCap", ascending=False, na_position="last")
         sub_scores = {
-            key: relative_scores(sdf, key, hb)
+            key: relative_scores(sdf, key, hb, domains.get(key))
             for key, _l, _g, _f, hb in metrics if hb is not None
         }
         thin = " thin" if len(sdf) < 3 else ""
@@ -738,11 +747,13 @@ def build_js(metrics: list) -> str:
 
 
 def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
-                 metrics: list, universe: dict, group_labels: dict) -> str:
+                 metrics: list, universe: dict, group_labels: dict,
+                 domains: dict) -> str:
     asof = spx.get("asof", datetime.now(timezone.utc))
     asof_s = asof.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     sectors = "".join(
-        render_sector(sec, df[df.sector == sec], proxies, metrics, universe, group_labels)
+        render_sector(sec, df[df.sector == sec], proxies, metrics, universe,
+                      group_labels, domains)
         for sec in universe
     )
     spx_html = render_spx(spx, df, proxies, universe)
