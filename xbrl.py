@@ -14,6 +14,8 @@ Usage:  facts = fetch_ticker_facts("AAPL", "0000320193")
 from __future__ import annotations
 
 import json
+import time
+import urllib.error
 from datetime import date
 from typing import NamedTuple
 
@@ -27,13 +29,33 @@ CONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
 # figures, so that a split cannot corrupt them: a dollar total carries no share
 # basis. epsDiluted is fetched only as an independent cross-check in the proof
 # harness -- it is never a numerator's source.
+# dep's chain, measured against the first 25 tickers of the real sweep:
+# DepreciationDepletionAndAmortization alone resolved only 16/25 (64%) of
+# names carrying OperatingIncomeLoss, against 80-96% for every other concept.
+# DepreciationAndAmortization is the single most complete tag for the biggest
+# group of the misses (e.g. ADSK 163 facts, AMAT 158) and leads the chain
+# because pick_tag selects by fact count, not chain order -- a filer carrying
+# both DepreciationAndAmortization and Depreciation resolves to whichever has
+# more facts, no special-casing needed. Depreciation is a knowingly weak last
+# resort: ADI splits its disclosure into Depreciation (155 facts) and
+# AmortizationOfIntangibleAssets (184 facts) with no combined tag at all, so
+# resolving to Depreciation alone understates D&A and therefore overstates
+# EBITDA. That is acceptable only because the proof harness reconstructs the
+# multiple and rejects any (ticker, metric) pair missing Yahoo's published
+# value by more than 1% median -- a name like ADI ends up with no EV/EBITDA
+# history rather than a wrong one. Summing Depreciation and
+# AmortizationOfIntangibleAssets would fix ADI, but that is a structural
+# change to the one-tag-per-chain model and belongs in its own task if the
+# proof harness later shows it is worth it.
 CONCEPTS: dict[str, tuple[str, ...]] = {
     "netIncome": ("NetIncomeLoss",),
     "revenue":   ("RevenueFromContractWithCustomerExcludingAssessedTax",
                   "Revenues", "SalesRevenueNet"),
     "opIncome":  ("OperatingIncomeLoss",),
-    "dep":       ("DepreciationDepletionAndAmortization",
-                  "DepreciationAmortizationAndAccretionNet"),
+    "dep":       ("DepreciationAndAmortization",
+                  "DepreciationDepletionAndAmortization",
+                  "DepreciationAmortizationAndAccretionNet",
+                  "Depreciation"),
     "shares":    ("WeightedAverageNumberOfDilutedSharesOutstanding",),
     "cash":      ("CashAndCashEquivalentsAtCarryingValue",),
     "debtLT":    ("LongTermDebtNoncurrent",),
@@ -235,6 +257,37 @@ def ticker_cik_map() -> dict[str, str]:
     return parse_ticker_map(sec_get(TICKER_MAP_URL))
 
 
-def fetch_concept(cik: str, tag: str) -> bytes:
-    """One companyconcept document. Measured 18-51 KB for AAPL/ORCL tags."""
-    return sec_get(CONCEPT_URL.format(cik=cik, concept=tag))
+def fetch_concept(cik: str, tag: str, tries: int = 3) -> bytes:
+    """One companyconcept document. Measured 18-51 KB for AAPL/ORCL tags.
+
+    A 404 means "this filer does not use this tag" -- the normal, expected
+    outcome for roughly 4-6 of the ~14 tags a full sweep probes per ticker:
+    the revenue chain alone has 3 members and a filer uses 1, the dep chain
+    has 2, and LongTermDebtCurrent is frequently absent outright. That is the
+    whole point of a chain -- pick_tag's fallback only works if the other
+    members are allowed to come back empty.
+
+    edgar.sec_get's default retry (3 tries, 1.5+3.0+4.5s backoff) is correct
+    for its own 13F callers, where a 404 is anomalous, but is wrong here: it
+    turns every absent tag into a measured 9.2s of pure backoff on top of the
+    real ~0.2s 404 latency. Across a 153-ticker sweep that is on the order of
+    600 absent tags, the actual cause of a run measured at 25 tickers in 25
+    minutes projecting to roughly 3 hours against a 2.3-minute estimate. So
+    the retry decision is made here, per exception, instead of inside
+    sec_get: a 404 returns on the first attempt, while a timeout, 503 or
+    reset -- genuinely transient, unlike a missing tag -- still gets the same
+    3-try, 1.5/3.0/4.5s-backoff schedule sec_get itself would have given it.
+    """
+    url = CONCEPT_URL.format(cik=cik, concept=tag)
+    last: Exception | None = None
+    for attempt in range(tries):
+        try:
+            return sec_get(url, tries=1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise
+            last = exc
+        except Exception as exc:        # noqa: BLE001 - retried like sec_get
+            last = exc
+        time.sleep(1.5 * (attempt + 1))
+    raise last  # type: ignore[misc]

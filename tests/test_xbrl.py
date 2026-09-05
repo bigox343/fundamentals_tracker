@@ -1,4 +1,5 @@
 import json
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -186,3 +187,42 @@ def test_a_null_filed_writes_no_fact():
     raw = (b'{"units":{"USD":[{"start":"2025-01-01","end":"2025-03-31",'
            b'"val":100.0,"fy":2025,"fp":"Q1","form":"10-Q","filed":null}]}}')
     assert xbrl.parse_concept("T", "NetIncomeLoss", raw) == []
+
+
+def test_fetch_concept_treats_a_404_as_absent_without_retrying(monkeypatch):
+    # Measured: edgar.sec_get's default retry (3 tries, 1.5+3.0+4.5s backoff)
+    # turns a 404 -- the normal outcome when a filer does not use a tag --
+    # into 9.2s of pure backoff. A sweep probes ~4-6 absent tags per ticker,
+    # so this must return on the first attempt, not sec_get's third.
+    calls = []
+
+    def fake_sec_get(url, tries=3):
+        calls.append(tries)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(xbrl, "sec_get", fake_sec_get)
+    monkeypatch.setattr(xbrl.time, "sleep", lambda s: pytest.fail(
+        "a 404 must not sleep between retries; there is no retry"))
+
+    with pytest.raises(urllib.error.HTTPError):
+        xbrl.fetch_concept("0000320193", "SomeTagNobodyFiles")
+    assert calls == [1], "a 404 must be tried exactly once"
+
+
+def test_fetch_concept_still_retries_a_non_404_failure(monkeypatch):
+    # A timeout, 503 or reset is genuinely transient, unlike a missing tag,
+    # and must keep the exact 3-try, 1.5/3.0/4.5s-backoff schedule
+    # edgar.sec_get itself would have given it.
+    calls, sleeps = [], []
+
+    def fake_sec_get(url, tries=3):
+        calls.append(tries)
+        raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(xbrl, "sec_get", fake_sec_get)
+    monkeypatch.setattr(xbrl.time, "sleep", lambda s: sleeps.append(s))
+
+    with pytest.raises(urllib.error.HTTPError):
+        xbrl.fetch_concept("0000320193", "SomeTag")
+    assert len(calls) == 3, "a non-404 failure must still be retried 3 times"
+    assert sleeps == [1.5, 3.0, 4.5]
