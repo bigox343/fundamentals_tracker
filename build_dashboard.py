@@ -390,28 +390,50 @@ def fetch_all() -> pd.DataFrame:
 # Price history: one bulk download feeds both the per-ticker sparklines and    #
 # the proxy-ETF band returns.                                                  #
 # --------------------------------------------------------------------------- #
+def _select_price_column(raw: pd.DataFrame, yh: dict[str, str],
+                         column: str) -> pd.DataFrame:
+    """Pull one OHLC column out of a yf.download response, renamed back.
+
+    yfinance wants BF-B where the universe lists BF.B, so callers download
+    under the dashed form and this renames back to the input symbol. Also
+    handles yfinance's single-symbol quirk: a lone ticker comes back as flat,
+    unprefixed columns rather than a MultiIndex.
+    """
+    frame = (raw[column] if isinstance(raw.columns, pd.MultiIndex)
+             else raw[[column]]).copy()
+    if len(yh) == 1 and frame.shape[1] == 1:
+        frame.columns = list(yh.values())
+    out = pd.DataFrame(index=frame.index)
+    for sym, ysym in yh.items():
+        if ysym in frame.columns:
+            out[sym] = frame[ysym]
+    return out
+
+
 def fetch_closes(symbols: list[str], period: str = HIST_PERIOD,
                  adjusted: bool = True) -> pd.DataFrame:
     """Daily closes for `symbols`, columns keyed by the input symbol.
 
-    yfinance wants BF-B where the universe lists BF.B, so download under the
-    dashed form and rename back. One batched call — no per-ticker throttling
-    needed here, unlike the `.info` pulls in fetch_all().
+    One batched call — no per-ticker throttling needed here, unlike the
+    `.info` pulls in fetch_all().
 
     The dashboard asks for HIST_PERIOD; the history store asks for STORE_PERIOD.
 
     `adjusted` selects which of the two price bases the store keeps. True
     (the default) is split- and dividend-adjusted -- correct for returns and
-    sparklines, which is everything this function's other callers use it for.
-    False asks yfinance for auto_adjust=False, whose `Close` is still
-    split-adjusted -- only the dividend adjustment comes off. That is the
-    basis a market cap needs: a dividend-adjusted price understates what the
-    market actually paid, by an amount that compounds with yield. Measured at
-    2021-09-01, Close against Adj Close: VZ 54.94 vs 40.05 (37.2%), IBM 133.17
-    vs 109.98 (21.1%), KO 56.69 vs 48.90 (15.9%), PG 143.84 vs 126.50 (13.7%),
-    MSFT 301.83 vs 289.67 (4.2%). Every historical multiple built on the
-    adjusted close would read that much too cheap, worst on exactly the
-    income names where a P/E history is most often consulted.
+    sparklines, which is what every caller of this function wants (the daily
+    record path instead uses fetch_close_pair() below, so it never needs
+    `adjusted=False` here). False asks yfinance for auto_adjust=False, whose
+    `Close` is still split-adjusted -- only the dividend adjustment comes off.
+    That is the basis a market cap needs: a dividend-adjusted price
+    understates what the market actually paid, by an amount that compounds
+    with yield. Measured at 2021-09-01, Close against Adj Close: VZ 54.94 vs
+    40.05 (37.2%), IBM 133.17 vs 109.98 (21.1%), KO 56.69 vs 48.90 (15.9%),
+    PG 143.84 vs 126.50 (13.7%), MSFT 301.83 vs 289.67 (4.2%). Every
+    historical multiple built on the adjusted close would read that much too
+    cheap, worst on exactly the income names where a P/E history is most
+    often consulted. (Kept as a standalone mode for tools/backfill_close_raw.py,
+    a one-time sweep that only ever needs this one series.)
     """
     if not symbols:
         return pd.DataFrame()
@@ -426,16 +448,53 @@ def fetch_closes(symbols: list[str], period: str = HIST_PERIOD,
         return pd.DataFrame()
     if raw is None or raw.empty:
         return pd.DataFrame()
-    close = (raw["Close"] if isinstance(raw.columns, pd.MultiIndex)
-             else raw[["Close"]]).copy()
-    # a lone symbol comes back as a single unnamed 'Close' column
-    if len(yh) == 1 and close.shape[1] == 1:
-        close.columns = list(yh.values())
-    out = pd.DataFrame(index=close.index)
-    for sym, ysym in yh.items():
-        if ysym in close.columns:
-            out[sym] = close[ysym]
-    return out
+    return _select_price_column(raw, yh, "Close")
+
+
+def fetch_close_pair(symbols: list[str],
+                     period: str = HIST_PERIOD) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One auto_adjust=False download, yielding both price bases at once.
+
+    Returns (adjusted, raw). `adjusted` is yfinance's `Adj Close`, which
+    matches fetch_closes(..., adjusted=True) to within float32-rounding noise
+    (re-verified here: max abs diff 4.6e-5 on KO/VZ/NVDA over 5 years, a
+    relative difference of ~5e-7 -- far below the precision anything in this
+    store is read at) and is what the `close` metric keeps holding. `raw` is
+    `Close`, split-adjusted only, and is what `closeRaw` needs.
+
+    Deriving both series from one response rather than issuing two downloads
+    matters for two independent reasons:
+
+    1. Correctness: two separate downloads can disagree on which tickers came
+       back -- a transient failure on one call and not the other -- which
+       would let `close` and `closeRaw` silently diverge in date coverage for
+       the same name. One response makes that impossible: the two frames
+       returned here always share the same index and the same columns.
+    2. Cost: `yf.download(threads=True)` over the universe is the documented
+       cause of this project's file-descriptor incident (README.md, "The
+       file-descriptor limit is load-bearing") -- every worker thread holds
+       an HTTPS socket *and* a SQLite connection to yfinance's own tz cache,
+       and at launchd's default 256-file soft limit that cost the daily run a
+       third of the universe, misreported as "possibly delisted" rather than
+       as resource exhaustion. A second full download on every daily run
+       would double exposure to that failure mode for no benefit, since one
+       auto_adjust=False call already carries both series.
+    """
+    if not symbols:
+        return pd.DataFrame(), pd.DataFrame()
+    yh = {s: s.replace(".", "-") for s in symbols}
+    try:
+        raw = yf.download(
+            list(dict.fromkeys(yh.values())), period=period, interval="1d",
+            auto_adjust=False, progress=False, threads=True,
+        )
+    except Exception as e:
+        print(f"  price history pull failed: {e}", file=sys.stderr)
+        return pd.DataFrame(), pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    return (_select_price_column(raw, yh, "Adj Close"),
+           _select_price_column(raw, yh, "Close"))
 
 
 def _ret(close: pd.Series, back: int):
@@ -579,8 +638,16 @@ def single_instance():
         handle.close()
 
 
-def record_history(df, closes, est_rows, as_of, failed, own=None):
-    """Persist one day's observations. Never fatal to the dashboard build."""
+def record_history(df, closes, closes_raw, est_rows, as_of, failed, own=None):
+    """Persist one day's observations. Never fatal to the dashboard build.
+
+    `closes` and `closes_raw` come from one fetch_close_pair() call at the
+    caller, not two separate fetch_closes() calls here -- see that function's
+    docstring for why: it is both a correctness guarantee (the two series
+    cannot end up with different ticker/date coverage) and a cost one (this
+    daily run does not double its exposure to the file-descriptor failure
+    mode documented in README.md).
+    """
     conn = history.connect()
     try:
         history.ensure_schema(conn)
@@ -588,18 +655,9 @@ def record_history(df, closes, est_rows, as_of, failed, own=None):
         written = history.ingest_snapshot(conn, df, as_of)
         history.upsert_companies(conn, df)
         written += history.ingest_prices(conn, closes)
-        # The unadjusted basis, for valuation only. yfinance's Close under
-        # auto_adjust=False is still split-adjusted -- only the dividend
-        # adjustment comes off -- which is exactly the basis a historical
-        # market cap needs and `closes` above does not provide: measured at
-        # 2021-09-01, its dividend-adjusted Close reads VZ 37.2%, IBM 21.1%,
-        # KO 15.9% too cheap against this series. A second download, not a
-        # reuse of `closes`, because auto_adjust=True/False are two different
-        # yfinance calls that yfinance does not return together.
-        written += history.ingest_prices(
-            conn, fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD,
-                               adjusted=False),
-            metric="closeRaw")
+        # The unadjusted basis, for valuation only -- see fetch_close_pair()'s
+        # docstring for the measured VZ/IBM/KO gap this exists to avoid.
+        written += history.ingest_prices(conn, closes_raw, metric="closeRaw")
         written += history.upsert_rows(conn, est_rows)
         if own:
             holds, ins = own
@@ -839,10 +897,11 @@ def _run(args):
         fetch_13f()
 
         print("Fetching 5y closes for the history store...")
-        closes = fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD)
+        closes, closes_raw = fetch_close_pair(df["ticker"].tolist(),
+                                              period=STORE_PERIOD)
 
-        record_history(df, closes, est_rows, as_of.isoformat(), failed,
-                       own=(holds, ins))
+        record_history(df, closes, closes_raw, est_rows, as_of.isoformat(),
+                       failed, own=(holds, ins))
 
         print("Fetching SPX snapshot...")
         spx = fetch_spx()
