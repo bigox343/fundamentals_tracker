@@ -91,6 +91,12 @@ positioning change and insider purchases, z-scored within sub-industry
     REPORTS.mkdir(exist_ok=True)
     path = REPORTS / f"portfolio_{as_of.replace('-', '')}.html"
     path.write_text(html)
+    # The writer owns its own retention. Pruning these from the daily run
+    # instead would run before this file is written, leaving one more on disk
+    # than RETAIN_DATED asks for.
+    import build_dashboard
+    import extract
+    extract.prune_dated(REPORTS, "portfolio_*.html", build_dashboard.RETAIN_DATED)
     return path
 
 

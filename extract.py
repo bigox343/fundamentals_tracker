@@ -9,6 +9,7 @@ producer and store; importing a NamedTuple is not knowledge of SQL.
 """
 from __future__ import annotations
 
+import re
 import time
 from calendar import monthrange
 from datetime import date, timedelta
@@ -572,6 +573,38 @@ def read_csv_any(path: Path, **kwargs):
     """
     kwargs.setdefault("float_precision", "round_trip")
     return pd.read_csv(path, **kwargs)
+
+
+_DATED_RE = re.compile(r"_(\d{4})(\d{2})(\d{2})\.[A-Za-z.]+$")
+
+
+def dated_stamp(path) -> str | None:
+    """'estimates_20260904.csv.gz' -> '2026-09-04'."""
+    match = _DATED_RE.search(str(path))
+    return "-".join(match.groups()) if match else None
+
+
+def prune_dated(directory: Path, pattern: str, keep: int,
+                safe_dates: set[str] | None = None) -> list[Path]:
+    """Delete all but the newest `keep` dated files matching `pattern`.
+
+    `safe_dates` is a guard, not a filter: a file is removed only if its date
+    is in that set. The set is the store's own record of what it has ingested,
+    so a run that wrote a CSV and then failed before recording it cannot have
+    that CSV deleted underneath it by the next run. Pass None for outputs that
+    are rendered rather than ingested, where there is nothing to lose.
+
+    Returns the paths removed.
+    """
+    files = sorted((p for p in Path(directory).glob(pattern)
+                    if dated_stamp(p)), key=lambda p: dated_stamp(p))
+    removed: list[Path] = []
+    for path in files[:max(0, len(files) - keep)]:
+        if safe_dates is not None and dated_stamp(path) not in safe_dates:
+            continue
+        path.unlink()
+        removed.append(path)
+    return removed
 
 
 def write_rows_csv(rows, columns, path: Path) -> int:

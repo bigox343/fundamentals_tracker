@@ -7,3 +7,4 @@ __pycache__/
 .pytest_cache/
 logs/
 .vscode/
+.DS_Store

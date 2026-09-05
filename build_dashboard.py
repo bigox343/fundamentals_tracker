@@ -169,6 +169,20 @@ THIRTEENF_RECHECK_DAYS = 7
 
 CUSIP_MAP_PATH = DATA_DIR / "cusip_map.csv"
 
+# How many dated files of each kind to keep on disk. The observations
+# themselves live in history.db, which is where every reader gets them; these
+# files are the path back if the database is lost.
+#
+# Set to 1, the database stops being reconstructable and becomes the only copy
+# of the perishable estimate history -- so the pruning below deletes a file
+# only once the store confirms it holds that date, and `--rebuild-history`
+# reports what it can no longer restore. Raise this to keep more.
+#
+# Not covered here, deliberately: data/13f_*.csv.gz and data/cusip_map.csv are
+# not daily files (four a year, and one checked-in reference), and 13F cannot
+# be refetched for a quarter whose filings have been amended away.
+RETAIN_DATED = 1
+
 
 PROXY_ETFS: dict[str, str | None] = {
     # sector level
@@ -1417,6 +1431,42 @@ def rebuild_13f() -> int:
     return 0
 
 
+def prune_dated_files(as_of: str) -> None:
+    """Keep only the newest RETAIN_DATED dated files of each kind.
+
+    Runs after the store has been written, and only removes a file whose date
+    the store confirms it holds -- so a run that fetched but failed to record
+    cannot have its evidence deleted by the next one.
+    """
+    if RETAIN_DATED <= 0:
+        return
+    try:
+        conn = history.connect()
+        ingested = {
+            "fundamentals": {r[0] for r in conn.execute(
+                "SELECT DISTINCT as_of FROM metrics WHERE period_type = 'snapshot'")},
+            "estimates": {r[0] for r in conn.execute(
+                "SELECT DISTINCT as_of FROM metrics WHERE period_type = 'estimate'")},
+        }
+        conn.close()
+    except Exception as exc:  # noqa: BLE001 - never let housekeeping fail a run
+        print(f"  prune skipped, store unavailable: {exc}")
+        return
+
+    removed = 0
+    for kind in ("fundamentals", "estimates"):
+        removed += len(extract.prune_dated(
+            DATA_DIR, f"{kind}_*.csv.gz", RETAIN_DATED, ingested[kind]))
+    # Holder lists and insider filings are current-state snapshots that can be
+    # refetched, so neither needs the ingestion guard. The rendered reports are
+    # pruned by their own writers, which run after this one.
+    for pattern in ("holdings_*.csv.gz", "insiders_*.csv.gz"):
+        removed += len(extract.prune_dated(DATA_DIR, pattern, RETAIN_DATED))
+    if removed:
+        print(f"Pruned {removed} dated files, keeping the newest "
+              f"{RETAIN_DATED} of each.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-fetch", action="store_true",
@@ -1439,6 +1489,11 @@ def main():
         print(f"Rebuilt history: {report['rows']} rows from "
               f"{report['snapshots']} snapshots and "
               f"{report['estimates']} estimate files")
+        if RETAIN_DATED and report["estimates"] <= RETAIN_DATED:
+            print(f"  only {report['estimates']} day(s) of estimates restored: "
+                  f"RETAIN_DATED={RETAIN_DATED} prunes the rest after ingest, so "
+                  f"a rebuild recovers the retained days and not the history "
+                  f"before them. Raise RETAIN_DATED to keep more.")
         if not report["prices"]:
             print("  no daily closes restored — they live only in the store, "
                   "being refetchable. The next normal run repopulates them.")
@@ -1498,6 +1553,8 @@ def _run(args):
 
         print("Fetching SPX snapshot...")
         spx = fetch_spx()
+
+        prune_dated_files(as_of.isoformat())
 
     print("Fetching proxy-ETF benchmarks...")
     proxies = fetch_proxies(df)

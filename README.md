@@ -101,32 +101,40 @@ knowledge of SQL.
 
 ## The data
 
-### `data/` is the record of truth
+### `data/` and the store
 
-The dated CSVs are gzipped text and are **never pruned**. They compress 5.9x
-blended (estimates 8.8x, insiders 6.3x, fundamentals only 2.2x), which takes
-`data/` from 433 MB/yr to 73 MB/yr.
+Observations live in `data/history.db`. The dated CSVs are gzipped text and
+are the path *back* to it if the database is lost.
 
-Compressing rather than pruning is deliberate. Deleting old dated files would
-not lose data today — it is all in `history.db` — but it would delete the
-*rebuild path*, inverting the guarantee below: pruned, the database becomes the
-only copy of the perishable estimate history. Files written before the switch
-are still read, so no migration is required. `history.db` is derived
-from them and therefore disposable — a corrupted or deleted database costs a
-`--rebuild-history`, not data.
+By default only the newest of each is kept — `RETAIN_DATED` in
+[build_dashboard.py](build_dashboard.py). That keeps `data/` to a handful of
+files rather than accumulating four per run forever, at a real cost worth
+stating plainly: **the database is no longer fully reconstructable.** A rebuild
+recovers the retained days and nothing before them, and `--rebuild-history`
+says so rather than reporting a smaller number as though it were complete.
 
-This matters because the two datasets have opposite urgency. Statements, closes
-and share counts are **recoverable**: equally available in six months. Forward
-estimates, analyst dispersion and revision breadth are **perishable** — only
-`eps_trend` carries any history at all (~90 days), and every observation not
-taken is lost permanently. That asymmetry is also why the cadence is daily:
-daily can always be downsampled to weekly, weekly can never be upsampled to daily.
+Two things make that safe enough to be the default. The run prunes a file only
+once the store confirms it holds that date, so a fetch that failed before
+recording cannot have its evidence deleted by the next run. And the two
+datasets differ in how much the loss matters: statements, closes and share
+counts are **recoverable** — equally available in six months — while forward
+estimates, analyst dispersion and revision breadth are **perishable**, since
+only `eps_trend` carries any history at all (~90 days) and every observation
+not taken is lost permanently. Pruned estimates are not gone, they are simply
+held in one place instead of two.
 
-One exception to the rebuild guarantee: **daily closes are not restored** by
-`--rebuild-history`, because no CSV holds them — unlike estimates they can be
-refetched in full at any time. A rebuilt store is complete in the perishable data
-and empty of prices until the next normal run. `report['prices']` reports the
-shortfall so the gap cannot be mistaken for data loss.
+Raise `RETAIN_DATED` if you would rather trade the disk for the second copy;
+at four files a run it costs about 300 KB a day.
+
+Never pruned, deliberately: `data/13f_*.csv.gz` and `data/13f_filings.csv.gz`
+are quarterly rather than daily, and a 13F amended away cannot be refetched;
+`data/cusip_map.csv` and `data/ff_factors.csv.gz` are checked-in references.
+
+One further exception to the rebuild guarantee: **daily closes are not
+restored** by `--rebuild-history`, because no CSV holds them — unlike estimates
+they can be refetched in full at any time. A rebuilt store is empty of prices
+until the next normal run. `report['prices']` reports the shortfall so the gap
+cannot be mistaken for data loss.
 
 ### Schema
 
