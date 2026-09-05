@@ -77,11 +77,18 @@ is negative — lands far below the median, clips to -1.0, and is negated to
 
 Scale of the problem on 2026-09-04:
 
-    metric        n    negative    absurd    unrankable
+    metric        n    negative    large      (negative + large)
     evEbitda    153       5        16 (>60x)   21  (14%)
     trailingPE  141       0        10 (>100x)  10   (7%)
     forwardPE   153       1         7 (>80x)    8   (5%)
     ps          153       0         3 (>40x)    3   (2%)
+
+Two different problems sit in that table and only one of them is a bug. The
+**negative** column is undefined arithmetic and is what §4 excludes. The
+**large** column is an ad-hoc "looks absurd" cut used here to describe data
+quality; those values are real, defined ratios and the existing clip already
+bounds them. Do not read the combined figure as the number of cells the guard
+removes -- see §4.
 
 Sub-industries carrying a poisoned EV/EBITDA score: Software — Infrastructure
 (7 names), Semiconductors (4), Software — Applications (2), Semicap Equipment,
@@ -276,9 +283,20 @@ also repairs the scores of every *other* name in the band, because `med` and
 `mad` are computed over the surviving values (§2.2, measured at ~0.49 of scale
 for Software — Infrastructure).
 
-Expect visible change: 21 names stop being tinted on EV/EBITDA, 10 on trailing
-P/E, 8 on forward P/E, and BA plus the four near-zero-EBITDA software names stop
-being tinted on ND/EBITDA.
+Expect visible change, measured against 2026-09-04 and counting only what the
+guard actually removes -- the non-positive values, not §2.2's combined figure:
+
+    evEbitda        5 excluded   (BA, NET, RBLX, SNAP, SNOW)
+    netDebtEbitda   5 excluded   (the same names, keyed off EBITDA's sign)
+    forwardPE       1 excluded   (RBLX)
+    trailingPE      0 excluded
+    ps              0 excluded
+
+The larger effect is on the cells that remain. Because `med` and `mad` are taken
+over the surviving values, 22 cells across the universe shift by more than a
+quarter of the scale -- ORCL and MSFT on EV/EBITDA from 0.18 to 0.67, META from
+0.46 to 0.96, DIS from 0.43 to 0.78. No band loses tinting entirely: the
+`len(valid) < 3` floor is never reached on live data.
 
 ---
 
