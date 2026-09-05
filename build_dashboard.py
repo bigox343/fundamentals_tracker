@@ -390,14 +390,28 @@ def fetch_all() -> pd.DataFrame:
 # Price history: one bulk download feeds both the per-ticker sparklines and    #
 # the proxy-ETF band returns.                                                  #
 # --------------------------------------------------------------------------- #
-def fetch_closes(symbols: list[str], period: str = HIST_PERIOD) -> pd.DataFrame:
-    """Adjusted daily closes for `symbols`, columns keyed by the input symbol.
+def fetch_closes(symbols: list[str], period: str = HIST_PERIOD,
+                 adjusted: bool = True) -> pd.DataFrame:
+    """Daily closes for `symbols`, columns keyed by the input symbol.
 
     yfinance wants BF-B where the universe lists BF.B, so download under the
     dashed form and rename back. One batched call — no per-ticker throttling
     needed here, unlike the `.info` pulls in fetch_all().
 
     The dashboard asks for HIST_PERIOD; the history store asks for STORE_PERIOD.
+
+    `adjusted` selects which of the two price bases the store keeps. True
+    (the default) is split- and dividend-adjusted -- correct for returns and
+    sparklines, which is everything this function's other callers use it for.
+    False asks yfinance for auto_adjust=False, whose `Close` is still
+    split-adjusted -- only the dividend adjustment comes off. That is the
+    basis a market cap needs: a dividend-adjusted price understates what the
+    market actually paid, by an amount that compounds with yield. Measured at
+    2021-09-01, Close against Adj Close: VZ 54.94 vs 40.05 (37.2%), IBM 133.17
+    vs 109.98 (21.1%), KO 56.69 vs 48.90 (15.9%), PG 143.84 vs 126.50 (13.7%),
+    MSFT 301.83 vs 289.67 (4.2%). Every historical multiple built on the
+    adjusted close would read that much too cheap, worst on exactly the
+    income names where a P/E history is most often consulted.
     """
     if not symbols:
         return pd.DataFrame()
@@ -405,7 +419,7 @@ def fetch_closes(symbols: list[str], period: str = HIST_PERIOD) -> pd.DataFrame:
     try:
         raw = yf.download(
             list(dict.fromkeys(yh.values())), period=period, interval="1d",
-            auto_adjust=True, progress=False, threads=True,
+            auto_adjust=adjusted, progress=False, threads=True,
         )
     except Exception as e:
         print(f"  price history pull failed: {e}", file=sys.stderr)
@@ -574,6 +588,18 @@ def record_history(df, closes, est_rows, as_of, failed, own=None):
         written = history.ingest_snapshot(conn, df, as_of)
         history.upsert_companies(conn, df)
         written += history.ingest_prices(conn, closes)
+        # The unadjusted basis, for valuation only. yfinance's Close under
+        # auto_adjust=False is still split-adjusted -- only the dividend
+        # adjustment comes off -- which is exactly the basis a historical
+        # market cap needs and `closes` above does not provide: measured at
+        # 2021-09-01, its dividend-adjusted Close reads VZ 37.2%, IBM 21.1%,
+        # KO 15.9% too cheap against this series. A second download, not a
+        # reuse of `closes`, because auto_adjust=True/False are two different
+        # yfinance calls that yfinance does not return together.
+        written += history.ingest_prices(
+            conn, fetch_closes(df["ticker"].tolist(), period=STORE_PERIOD,
+                               adjusted=False),
+            metric="closeRaw")
         written += history.upsert_rows(conn, est_rows)
         if own:
             holds, ins = own

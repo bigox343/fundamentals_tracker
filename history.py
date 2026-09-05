@@ -435,11 +435,18 @@ def upsert_companies(conn: sqlite3.Connection, df) -> int:
     return len(payload)
 
 
-def price_rows(closes) -> list[MetricRow]:
-    """Convert a date-indexed close-price frame into daily observations.
+def price_rows(closes, metric: str = "close") -> list[MetricRow]:
+    """Melt a date-indexed close-price frame into daily observations.
 
     Accepts what yf.download(...)["Close"] returns: rows are dates, columns
     are tickers. Gaps (holidays, halted names) produce no row.
+
+    `metric` distinguishes the two price bases the store now keeps. `close`
+    is split- and dividend-adjusted and serves returns and sparklines.
+    `closeRaw` is split-adjusted only, and is the one a historical market cap
+    must use -- a dividend-adjusted price understates what the market
+    actually paid, by 37% on VZ over five years (measured at 2021-09-01:
+    Close 54.94 vs Adj Close 40.05).
     """
     if closes is None or closes.empty:
         return []
@@ -450,13 +457,13 @@ def price_rows(closes) -> list[MetricRow]:
             if not is_finite(value):
                 continue
             rows.append(
-                MetricRow(str(ticker), as_of, "daily", "close", "", float(value))
+                MetricRow(str(ticker), as_of, "daily", metric, "", float(value))
             )
     return rows
 
 
-def ingest_prices(conn: sqlite3.Connection, closes) -> int:
-    return upsert_rows(conn, price_rows(closes))
+def ingest_prices(conn: sqlite3.Connection, closes, metric: str = "close") -> int:
+    return upsert_rows(conn, price_rows(closes, metric))
 
 
 def series(

@@ -735,3 +735,30 @@ def test_rebuild_leaves_reported_untouched_when_the_archive_is_missing(
     assert len(history.reported(conn, ticker="AAPL")) == 1
     assert report["reported"] == 1, \
         "the shortfall must be reported, not masked as a clean reconstruction"
+
+
+# --------------------------------------------------------------------------- #
+# closeRaw: the dividend-unadjusted price series                              #
+# --------------------------------------------------------------------------- #
+
+def test_price_rows_labels_the_unadjusted_series_separately(conn):
+    closes = pd.DataFrame(
+        {"AAPL": [100.0, 101.0]},
+        index=pd.to_datetime(["2026-09-03", "2026-09-04"]))
+    history.ingest_prices(conn, closes)
+    history.ingest_prices(conn, closes * 1.1, metric="closeRaw")
+    got = dict(conn.execute(
+        "SELECT metric, COUNT(*) FROM metrics WHERE period_type='daily' "
+        "GROUP BY metric"))
+    assert got == {"close": 2, "closeRaw": 2}
+
+
+def test_the_two_price_series_do_not_overwrite_each_other(conn):
+    closes = pd.DataFrame({"AAPL": [100.0]},
+                          index=pd.to_datetime(["2026-09-04"]))
+    history.ingest_prices(conn, closes)
+    history.ingest_prices(conn, closes * 1.2, metric="closeRaw")
+    vals = dict(conn.execute(
+        "SELECT metric, value FROM metrics WHERE period_type='daily'"))
+    assert vals["close"] == pytest.approx(100.0)
+    assert vals["closeRaw"] == pytest.approx(120.0)
