@@ -11,15 +11,7 @@ worse than an absent one, because it looks like knowledge.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pandas as pd
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-import history  # noqa: E402
 
 # 1% rather than exact, because Yahoo rounds and may define EBITDA slightly
 # differently. The median rather than the mean, so one bad day cannot reject a
@@ -32,7 +24,12 @@ MIN_OVERLAP = 2
 
 
 def proof(recon: pd.Series, reference: pd.Series) -> tuple[float, bool]:
-    """(median relative error, passed) over the overlapping index."""
+    """(median relative error, passed) over the overlapping index.
+
+    The error is median(|recon - reference| / reference): reference is always
+    the denominator, so the two arguments are not interchangeable -- swapping
+    them changes the error even though the verdict at 0% is unaffected.
+    """
     pair = pd.concat([recon.rename("r"), reference.rename("y")],
                      axis=1, join="inner").dropna()
     pair = pair[pair.y != 0]

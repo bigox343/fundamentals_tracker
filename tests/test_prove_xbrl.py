@@ -1,4 +1,5 @@
 import importlib.util
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +30,9 @@ def test_one_bad_day_does_not_reject_a_good_mapping():
     ref = pd.Series([100.0] * 9 + [100.0])
     recon = pd.Series([100.0] * 9 + [4000.0])
     err, ok = prove.proof(recon, ref)
+    # The outlier must not even dent the reported error -- nine of ten days
+    # sit at the median, so the 40x glitch on the tenth is invisible to it.
+    assert err == pytest.approx(0.0)
     assert ok, "nine exact days and one outlier should still pass"
 
 
@@ -57,6 +61,9 @@ def test_disjoint_indices_leave_nothing_to_compare():
     recon = pd.Series([100.0, 101.0], index=["2026-01-01", "2026-01-02"])
     reference = pd.Series([100.0, 101.0], index=["2026-02-01", "2026-02-02"])
     err, ok = prove.proof(recon, reference)
+    # No overlap means no median was ever computed, not a median of nothing
+    # that happens to read as falsy -- the error must come back as nan.
+    assert math.isnan(err)
     assert not ok
 
 
@@ -77,4 +84,7 @@ def test_all_zero_reference_values_cannot_pass():
     ref = pd.Series([0.0, 0.0, 0.0])
     recon = pd.Series([0.0, 0.0, 0.0])
     err, ok = prove.proof(recon, ref)
+    # Same reasoning as the no-overlap case: the floor is hit before any
+    # median is computed, so the error must be nan, not a numeric fluke.
+    assert math.isnan(err)
     assert not ok
