@@ -29,6 +29,11 @@ CONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
 # figures, so that a split cannot corrupt them: a dollar total carries no share
 # basis. epsDiluted is fetched only as an independent cross-check in the proof
 # harness -- it is never a numerator's source.
+#
+# Every tag here is a us-gaap concept: a foreign private issuer filing 20-F
+# under IFRS carries none of them. Observed on the real universe as zero
+# facts for INFY, SPOT and TSM -- a structural limit of this data source,
+# not a sweep failure.
 # dep's chain, measured against the first 25 tickers of the real sweep:
 # DepreciationDepletionAndAmortization alone resolved only 16/25 (64%) of
 # names carrying OperatingIncomeLoss, against 80-96% for every other concept.
