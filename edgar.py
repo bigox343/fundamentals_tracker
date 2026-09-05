@@ -217,7 +217,13 @@ def load_cusip_map(path: Path) -> dict[str, str]:
 # Network
 # --------------------------------------------------------------------------
 
-def _get(url: str, tries: int = 3) -> bytes:
+def sec_get(url: str, tries: int = 3) -> bytes:
+    """Fetch from SEC with the polite headers, gzip handling and backoff.
+
+    Public because xbrl.py needs the same manners against data.sec.gov. That is
+    a shared contract crossing a module line, the same precedent as MetricRow
+    living in history.py and being imported by extract.py.
+    """
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT,
                       "Accept-Encoding": "gzip, deflate"})
@@ -238,7 +244,7 @@ def filing_index(cik: str) -> list[tuple[str, str, str, str]]:
 
     Returns (quarter, filed_date, accession, form).
     """
-    payload = json.loads(_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
+    payload = json.loads(sec_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
     recent = payload["filings"]["recent"]
     seen = {
         (period, filed, accession, form)
@@ -256,14 +262,14 @@ def info_table_xml(cik: str, accession: str) -> str:
     """Fetch a filing's information table, whatever the filer named it."""
     base = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/"
             f"{accession.replace('-', '')}")
-    listing = _get(base + "/").decode("utf-8", "replace")
+    listing = sec_get(base + "/").decode("utf-8", "replace")
     names = [n for n in re.findall(r'href="([^"]+\.xml)"', listing)
              if "primary_doc" not in n.lower()]
     if not names:
         return ""
     url = ("https://www.sec.gov" + names[0]) if names[0].startswith("/") \
         else f"{base}/{names[0]}"
-    return _get(url).decode("utf-8", "replace")
+    return sec_get(url).decode("utf-8", "replace")
 
 
 def collect_13f(funds: Sequence[dict], quarters: Sequence[str],
