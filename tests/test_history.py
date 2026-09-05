@@ -6,6 +6,7 @@ import pytest
 
 import extract
 import history
+from xbrl import Fact
 
 
 @pytest.fixture
@@ -622,3 +623,115 @@ def test_upsert_insiders_and_read_back(conn):
     got = history.insiders(conn, "NVDA")
     assert len(got) == 2
     assert list(got.as_of) == ["2026-08-10", "2026-08-05"]
+
+
+# --------------------------------------------------------------------------- #
+# reported (SEC XBRL point-in-time facts)                                     #
+# --------------------------------------------------------------------------- #
+
+def _fact(**kw):
+    base = dict(ticker="AAPL", concept="NetIncomeLoss",
+                period_start="2026-03-29", period_end="2026-06-27",
+                fy=2026, fp="Q3", form="10-Q", filed="2026-07-31",
+                value=29789000000.0)
+    base.update(kw)
+    return Fact(**base)
+
+
+def test_an_amendment_coexists_with_the_original(conn):
+    history.upsert_reported(conn, [
+        _fact(form="10-K", filed="2026-10-30", value=100.0),
+        _fact(form="10-K/A", filed="2027-01-25", value=105.0),
+    ])
+    rows = history.reported(conn, ticker="AAPL")
+    assert len(rows) == 2, "filed is part of the key; neither may overwrite"
+    assert set(rows.value) == {100.0, 105.0}
+
+
+def test_a_ytd_and_a_quarter_on_the_same_end_are_distinct_rows(conn):
+    history.upsert_reported(conn, [
+        _fact(period_start="2026-03-29", value=2.01),
+        _fact(period_start="2025-09-29", value=4.85),
+    ])
+    assert len(history.reported(conn, ticker="AAPL")) == 2
+
+
+def test_reingesting_the_same_fact_does_not_duplicate_it(conn):
+    history.upsert_reported(conn, [_fact()])
+    history.upsert_reported(conn, [_fact()])
+    assert len(history.reported(conn, ticker="AAPL")) == 1
+
+
+def test_non_finite_values_write_no_row(conn):
+    assert history.upsert_reported(conn, [_fact(value=float("nan"))]) == 0
+    assert len(history.reported(conn)) == 0
+
+
+def test_last_filed_reports_the_newest_filing_per_ticker(conn):
+    history.upsert_reported(conn, [
+        _fact(ticker="AAPL", filed="2026-07-31"),
+        _fact(ticker="AAPL", filed="2026-04-30", period_end="2026-03-28"),
+        _fact(ticker="MSFT", filed="2026-05-02"),
+    ])
+    assert history.last_filed(conn) == {"AAPL": "2026-07-31",
+                                        "MSFT": "2026-05-02"}
+
+
+def test_the_csv_round_trips_exactly(conn, tmp_path):
+    facts = [_fact(value=1.9626000000000001), _fact(period_end="2026-03-28",
+                                                    value=3.0)]
+    history.upsert_reported(conn, facts)
+    path = tmp_path / "reported.csv.gz"
+    assert history.write_reported_csv(conn, path) == 2
+    back = history.read_reported_csv(path)
+    assert sorted(back) == sorted(facts), \
+        "round_trip float precision is what the raw archive exists to guarantee"
+
+
+def test_the_csv_round_trips_an_instant_fact(conn, tmp_path):
+    """period_start='' (a balance-sheet instant, e.g. cash) must come back as
+    '', not the string 'nan'. NaN is truthy in Python, so a naive
+    `x or ""` guard on the reread value silently corrupts every instant fact's
+    key -- this pins the fix instead of the bug.
+    """
+    fact = _fact(concept="CashAndCashEquivalentsAtCarryingValue",
+                period_start="", fp=None, value=61696000000.0)
+    history.upsert_reported(conn, [fact])
+    path = tmp_path / "reported.csv.gz"
+    history.write_reported_csv(conn, path)
+    back = history.read_reported_csv(path)
+    assert back == [fact]
+
+
+def test_rebuild_restores_reported_from_the_archive(tmp_path, conn):
+    """Archive present: `reported` is reconstructed from it, like metrics."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    history.upsert_reported(conn, [_fact()])
+    history.write_reported_csv(conn, data_dir / "reported.csv.gz")
+
+    fresh = sqlite3.connect(":memory:")
+    history.ensure_schema(fresh)
+    report = history.rebuild(fresh, data_dir)
+
+    assert report["reported"] == 1
+    assert len(history.reported(fresh, ticker="AAPL")) == 1
+    fresh.close()
+
+
+def test_rebuild_leaves_reported_untouched_when_the_archive_is_missing(
+        tmp_path, conn):
+    """Unlike metrics/companies, a missing archive must not empty the table.
+
+    Refetching `reported` costs ~1,368 SEC requests; a rebuild whose data_dir
+    happens to lack the archive must not be license to erase it.
+    """
+    history.upsert_reported(conn, [_fact()])
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    report = history.rebuild(conn, data_dir)
+
+    assert len(history.reported(conn, ticker="AAPL")) == 1
+    assert report["reported"] == 1, \
+        "the shortfall must be reported, not masked as a clean reconstruction"

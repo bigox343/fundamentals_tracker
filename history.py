@@ -165,6 +165,30 @@ CREATE TABLE IF NOT EXISTS target_weights (
   PRIMARY KEY (as_of, ticker)
 );
 
+-- Point-in-time SEC XBRL facts, from xbrl.py. `filed` is in the key so an
+-- original and its 10-K/A coexist as separate rows rather than one overwriting
+-- the other: a point-in-time series needs the number the market actually had
+-- on a date, not the number it was later corrected to, and keeping both also
+-- makes restatements queryable rather than invisible. `period_start` is in
+-- the key because one period_end carries both a year-to-date and a
+-- three-month fact, distinguishable only by duration (AAPL's 2026-03-28 is
+-- the worked example: a Q2 quarter and its YTD companion share an end date).
+CREATE TABLE IF NOT EXISTS reported (
+  ticker       TEXT NOT NULL,
+  concept      TEXT NOT NULL,   -- the us-gaap tag as filed
+  period_start TEXT NOT NULL,   -- '' for instant facts
+  period_end   TEXT NOT NULL,
+  fy           INTEGER,
+  fp           TEXT,
+  form         TEXT NOT NULL,
+  filed        TEXT NOT NULL,
+  value        REAL NOT NULL,
+  ingested_at  TEXT NOT NULL,
+  PRIMARY KEY (ticker, concept, period_end, period_start, filed)
+);
+
+CREATE INDEX IF NOT EXISTS reported_ticker_filed ON reported (ticker, filed);
+
 CREATE INDEX IF NOT EXISTS idx_metric_series ON metrics (ticker, metric, as_of);
 CREATE INDEX IF NOT EXISTS idx_metric_xsec   ON metrics (metric, as_of);
 CREATE INDEX IF NOT EXISTS idx_holdings      ON holdings (ticker, kind, as_of);
@@ -241,6 +265,116 @@ def upsert_rows(conn: sqlite3.Connection, rows: Iterable[MetricRow]) -> int:
     conn.executemany(_UPSERT_SQL, payload)
     conn.commit()
     return len(payload)
+
+
+# --------------------------------------------------------------------------- #
+# Reported facts (SEC XBRL, point-in-time)                                    #
+# --------------------------------------------------------------------------- #
+_UPSERT_REPORTED = """
+INSERT INTO reported (ticker, concept, period_start, period_end, fy, fp,
+                      form, filed, value, ingested_at)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(ticker, concept, period_end, period_start, filed)
+DO UPDATE SET value = excluded.value, ingested_at = excluded.ingested_at
+"""
+
+# Matches xbrl.Fact's field order exactly, so a row round-trips through
+# to_dict()/Fact(**row) without a name remap at either boundary.
+REPORTED_COLUMNS = ("ticker", "concept", "period_start", "period_end",
+                    "fy", "fp", "form", "filed", "value")
+
+
+def upsert_reported(conn: sqlite3.Connection, facts) -> int:
+    """Write xbrl.Fact rows, dropping non-finite values at the boundary.
+
+    Same write-boundary rule as upsert_rows: a missing row means "never
+    observed", which must stay distinct from a stored zero.
+    """
+    stamp = _now()
+    payload = [(f.ticker, f.concept, f.period_start, f.period_end, f.fy, f.fp,
+                f.form, f.filed, float(f.value), stamp)
+               for f in facts if is_finite(f.value)]
+    if not payload:
+        return 0
+    conn.executemany(_UPSERT_REPORTED, payload)
+    conn.commit()
+    return len(payload)
+
+
+def reported(conn: sqlite3.Connection, ticker: str | None = None,
+             concept: str | None = None) -> pd.DataFrame:
+    """Reported facts, optionally filtered by ticker and/or concept."""
+    sql = f"SELECT {', '.join(REPORTED_COLUMNS)} FROM reported"
+    where, args = [], []
+    if ticker:
+        where.append("ticker = ?")
+        args.append(ticker)
+    if concept:
+        where.append("concept = ?")
+        args.append(concept)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return pd.read_sql_query(sql + " ORDER BY ticker, period_end, filed",
+                             conn, params=args)
+
+
+def last_filed(conn: sqlite3.Connection) -> dict[str, str]:
+    """Newest filing date seen per ticker -- the sweep's freshness marker.
+
+    Read from the store rather than from a file mtime, so it survives whatever
+    retention policy data/ is on.
+    """
+    return {t: d for t, d in conn.execute(
+        "SELECT ticker, MAX(filed) FROM reported GROUP BY ticker")}
+
+
+def write_reported_csv(conn: sqlite3.Connection, path) -> int:
+    """The rebuild path for `reported`, as one undated archive.
+
+    Undated so extract.dated_stamp cannot match it and the pruner introduced
+    for the dated data/ files cannot reach it -- it sits alongside
+    cusip_map.csv and ff_factors.csv.gz as a reference file, not a dated
+    snapshot.
+    """
+    frame = reported(conn)
+    frame.to_csv(path, index=False, compression="gzip")
+    return len(frame)
+
+
+def read_reported_csv(path) -> list:
+    """The inverse of write_reported_csv, reconstructing xbrl.Fact rows.
+
+    float_precision="round_trip" for the same reason rebuild's snapshot read
+    needs it: the default CSV parser is inexact, and a reported fact is a
+    point-in-time observation that cannot be refetched from anywhere but the
+    SEC (about 1,368 requests for the current universe).
+
+    keep_default_na=False + na_values=[""] narrows "missing" to exactly the
+    empty field written by to_csv's default na_rep='' -- pandas' default NA
+    list otherwise swallows legitimate tokens (a form or concept named "NA"
+    would not appear in real data, but fp values are short, arbitrary-looking
+    codes and are not worth the risk).
+    """
+    from xbrl import Fact  # local import: history must not depend on xbrl at load
+    frame = pd.read_csv(path, float_precision="round_trip",
+                        keep_default_na=False, na_values=[""])
+    out = []
+    for r in frame.to_dict("records"):
+        # NaN is truthy in Python (`nan or ""` evaluates to nan, not ""), so
+        # `str(r["period_start"] or "")` would render a missing instant-fact
+        # period_start back as the literal string "nan" instead of "" --
+        # silently corrupting every AAPL cash/debtLT/debtST row's key on
+        # rebuild. pd.isna() is checked explicitly instead.
+        ps = r["period_start"]
+        period_start = "" if pd.isna(ps) else str(ps)
+        out.append(Fact(
+            ticker=r["ticker"], concept=r["concept"],
+            period_start=period_start,
+            period_end=str(r["period_end"]),
+            fy=None if pd.isna(r["fy"]) else int(r["fy"]),
+            fp=None if r["fp"] in ("", None) or pd.isna(r["fp"]) else r["fp"],
+            form=r["form"], filed=r["filed"], value=float(r["value"])))
+    return out
 
 
 # The numeric columns of data/fundamentals_YYYYMMDD.csv. The remaining five
@@ -448,6 +582,17 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
     rebuilt store is therefore complete in the perishable data and empty of
     prices until the next normal run repopulates them. `report['prices']`
     reports the shortfall so a caller cannot mistake the gap for data loss.
+
+    `reported` (SEC XBRL facts) follows neither pattern: it is cleared and
+    reconstructed when `data/reported.csv.gz` exists, exactly like metrics and
+    companies above -- but when that archive is missing, the table is left
+    untouched rather than emptied. Refetching it costs roughly 1,368 SEC
+    requests (one companyconcept call per ticker per concept chain), so
+    treating a missing archive like a missing fundamentals CSV -- silently
+    dropping every row -- would turn a rebuild into a real data-loss incident
+    rather than the harmless no-op it is for prices. `report['reported']`
+    reports the table's actual row count either way, so a caller sees the true
+    post-rebuild state instead of assuming the standard reconstruction ran.
     """
     import extract  # local import: history must not depend on extract at load
 
@@ -479,6 +624,19 @@ def rebuild(conn: sqlite3.Connection, data_dir) -> dict[str, int]:
 
     report["prices"] = conn.execute(
         "SELECT COUNT(*) FROM metrics WHERE period_type = 'daily'"
+    ).fetchone()[0]
+
+    archive = data_dir / "reported.csv.gz"
+    if archive.exists():
+        # Only clear `reported` once there is something to reconstruct it
+        # from -- an unconditional DELETE here (mirroring metrics/companies
+        # above) would, on a data_dir that simply lacks the archive, erase
+        # ~1,368 SEC requests' worth of history with no way back.
+        conn.execute("DELETE FROM reported")
+        conn.commit()
+        upsert_reported(conn, read_reported_csv(archive))
+    report["reported"] = conn.execute(
+        "SELECT COUNT(*) FROM reported"
     ).fetchone()[0]
     return report
 
