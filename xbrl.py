@@ -68,6 +68,14 @@ class Fact(NamedTuple):
 # Measured against AAPL (91/92-day quarters, 365/366-day years) and AVGO
 # (4-4-5 fiscal calendar, November year end); the 371-day 52/53-week case is
 # also inside the annual window.
+#
+# The gaps between bands (101-164 and 291-349 days) are deliberate, not an
+# oversight: they fall through to "other" and are dropped rather than
+# misclassified. A stub period from a fiscal-year-end change (a filer
+# shortening or lengthening one year to move its year-end) would land in one
+# of these gaps -- excluding it is the intended, conservative behavior, since
+# a stub is neither a clean quarter, half-year, nor full year and has no safe
+# duration bucket to be forced into.
 _SPANS = (("quarter", 80, 100), ("ytd", 165, 290), ("annual", 350, 380))
 
 
@@ -116,6 +124,10 @@ def pick_tag(ticker: str, chain: tuple[str, ...],
     AssessedTax carries 104 -- so a fallback taken per-period would jump
     between two different definitions of the same line depending on which tag
     happened to have a fact for that quarter.
+
+    On an exact tie the strict `n > best_n` keeps the earlier chain member,
+    which is the right default: CONCEPTS lists each chain with the preferred
+    tag first (e.g. the ASC 606 revenue tag before the legacy SalesRevenueNet).
     """
     best, best_n = None, 0
     for tag in chain:
@@ -128,12 +140,44 @@ def pick_tag(ticker: str, chain: tuple[str, ...],
     return best
 
 
-def _sum_first_three(year_facts: list[Fact]) -> tuple[float, str] | None:
-    quarters = {f.fp: f for f in year_facts if f.fp in ("Q1", "Q2", "Q3")}
-    if len(quarters) != 3:
+def _first_three_within(annual: Fact, quarters: list[Fact]) -> tuple[float, str] | None:
+    """The three quarters an annual fact's Q4 is built from, or None.
+
+    Grouping by the SEC's own fy/fp labels is a trap: those labels describe
+    the *filing's* fiscal context, not the period the fact covers, so every
+    filing's prior-year comparative carries the filing's fy/fp, not its own.
+    Measured on the committed AAPL fixture: accn 0001193125-10-012085 tags
+    both its 2008-12-27 prior-year comparative (val 2,255,000,000) and its
+    real 2009-12-26 quarter (val 3,378,000,000) as fy=2010/fp=Q1. Grouping by
+    fy/fp let a dict comprehension pick one arbitrarily and produced, on this
+    exact fixture, a synthesized Q4 spanning 2011-06-25..2009-09-26 with a
+    value of -11,064,000,000 -- 34 of 51 synthesized AAPL netIncome quarters
+    were corrupt this way (14/21 AAPL revenue, 18/27 ORCL revenue).
+
+    Containment on the periods themselves needs no label: a candidate quarter
+    must fall inside the annual span, end before the annual span ends, and be
+    knowable no later than the annual fact itself (filed <= annual.filed --
+    a quarter filed after the 10-K cannot have informed it). Duplicates at the
+    same (start, end) collapse to the latest filed version, since that is what
+    was known when the annual fact was filed. Anything other than exactly
+    three such quarters means reconstruction is not safe, so the year is
+    skipped rather than guessed at.
+    """
+    candidates: dict[tuple[str, str], Fact] = {}
+    for q in quarters:
+        if not (q.period_start >= annual.period_start
+                and q.period_end <= annual.period_end
+                and q.period_end < annual.period_end
+                and q.filed <= annual.filed):
+            continue
+        key = (q.period_start, q.period_end)
+        cur = candidates.get(key)
+        if cur is None or q.filed > cur.filed:
+            candidates[key] = q
+    if len(candidates) != 3:
         return None
-    total = sum(f.value for f in quarters.values())
-    return total, max(f.period_end for f in quarters.values())
+    total = sum(f.value for f in candidates.values())
+    return total, max(f.period_end for f in candidates.values())
 
 
 def quarterly(facts: list[Fact]) -> list[Fact]:
@@ -148,23 +192,24 @@ def quarterly(facts: list[Fact]) -> list[Fact]:
             if classify_span(f.period_start, f.period_end) == "quarter"]
     seen = {(f.period_start, f.period_end, f.filed) for f in kept}
 
-    by_year: dict[int, list[Fact]] = {}
-    for f in kept:
-        if f.fy is not None:
-            by_year.setdefault(f.fy, []).append(f)
-
     for f in facts:
         if classify_span(f.period_start, f.period_end) != "annual":
             continue
-        if f.fy is None:
-            continue
-        parts = _sum_first_three(by_year.get(f.fy, []))
+        parts = _first_three_within(f, kept)
         if parts is None:
             continue
         total, q3_end = parts
         key = (q3_end, f.period_end, f.filed)
         if key in seen:
             continue
+        # Hard invariant: nothing emitted here may run backwards. Containment
+        # above already forces q3_end < f.period_end, but this is the one
+        # check that would have caught the fy/fp bug immediately instead of
+        # three digits deep in a downstream valuation series -- it belongs in
+        # the code, not only in a test.
+        assert q3_end < f.period_end, (
+            f"synthesized Q4 would span {q3_end}..{f.period_end} for "
+            f"{f.ticker}/{f.concept} filed {f.filed}")
         seen.add(key)
         kept.append(Fact(f.ticker, f.concept, q3_end, f.period_end,
                          f.fy, "Q4", f.form, f.filed, f.value - total))

@@ -118,3 +118,71 @@ def test_non_finite_values_are_dropped_at_the_parse_boundary():
     raw = (b'{"units":{"USD":[{"start":"2025-01-01","end":"2025-03-31",'
            b'"val":null,"fy":2025,"fp":"Q1","form":"10-Q","filed":"2025-04-30"}]}}')
     assert xbrl.parse_concept("T", "NetIncomeLoss", raw) == []
+
+
+def test_no_synthesized_fact_has_a_backwards_span():
+    # Regression test for grouping Q4 candidates by the SEC's fy/fp labels,
+    # which describe the *filing's* fiscal context, not the period a fact
+    # covers. On these exact fixtures that bug produced a synthesized AAPL Q4
+    # spanning 2011-06-25..2009-09-26 with value -11,064,000,000 (34/51 AAPL
+    # netIncome, 14/21 AAPL revenue, 18/27 ORCL revenue synthesized quarters
+    # were corrupt this way). Containment-based grouping must produce zero.
+    for name, tag in [
+        ("xbrl_aapl_netincome", "NetIncomeLoss"),
+        ("xbrl_aapl_revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        ("xbrl_ora_revenues", "Revenues"),
+        ("xbrl_ora_rev_contract", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+    ]:
+        facts = xbrl.parse_concept("T", tag, _raw(name))
+        q = xbrl.quarterly(facts)
+        backwards = [f for f in q if f.period_start and f.period_start >= f.period_end]
+        assert backwards == [], f"{name}: {backwards}"
+
+
+def test_a_duplicate_annual_frame_does_not_produce_two_q4_facts():
+    # The companyconcept API can carry the same annual duration fact under
+    # more than one frame (identical start/end/filed, different frame label
+    # in a field the parser does not keep), which collapse to identical
+    # Facts here. Without the seen-guard, quarterly() would process the
+    # duplicate annual fact a second time and emit a second, identical Q4.
+    quarters = [
+        xbrl.Fact("T", "NetIncomeLoss", "2025-01-01", "2025-03-31",
+                  2025, "Q1", "10-Q", "2025-04-30", 100.0),
+        xbrl.Fact("T", "NetIncomeLoss", "2025-04-01", "2025-06-30",
+                  2025, "Q2", "10-Q", "2025-07-30", 110.0),
+        xbrl.Fact("T", "NetIncomeLoss", "2025-07-01", "2025-09-30",
+                  2025, "Q3", "10-Q", "2025-10-30", 120.0),
+    ]
+    annual = xbrl.Fact("T", "NetIncomeLoss", "2025-01-01", "2025-12-31",
+                        2025, "FY", "10-K", "2026-02-15", 500.0)
+    q = xbrl.quarterly(quarters + [annual, annual])
+    q4 = [f for f in q if f.period_end == "2025-12-31"]
+    assert len(q4) == 1
+
+
+def test_pick_tag_prefers_the_larger_real_orcl_tag_over_chain_order():
+    # Both Oracle revenue tags carry real, non-empty data: Revenues has 141
+    # facts, RevenueFromContractWithCustomerExcludingAssessedTax has 104. A
+    # chain-order rule ("first member with any facts") would pick the latter,
+    # since it is listed first in CONCEPTS["revenue"] -- the count rule must
+    # pick Revenues instead. Unlike the falls-through test, neither candidate
+    # here is empty, so this is the only test the count rule cannot pass by
+    # accident.
+    fetched = {
+        "RevenueFromContractWithCustomerExcludingAssessedTax":
+            _raw("xbrl_ora_rev_contract"),
+        "Revenues": _raw("xbrl_ora_revenues"),
+    }
+    assert xbrl.pick_tag("ORCL", xbrl.CONCEPTS["revenue"], fetched) == "Revenues"
+
+
+def test_a_null_end_writes_no_fact():
+    raw = (b'{"units":{"USD":[{"start":"2025-01-01","end":null,'
+           b'"val":100.0,"fy":2025,"fp":"Q1","form":"10-Q","filed":"2025-04-30"}]}}')
+    assert xbrl.parse_concept("T", "NetIncomeLoss", raw) == []
+
+
+def test_a_null_filed_writes_no_fact():
+    raw = (b'{"units":{"USD":[{"start":"2025-01-01","end":"2025-03-31",'
+           b'"val":100.0,"fy":2025,"fp":"Q1","form":"10-Q","filed":null}]}}')
+    assert xbrl.parse_concept("T", "NetIncomeLoss", raw) == []
