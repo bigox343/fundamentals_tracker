@@ -48,10 +48,17 @@ sixteen days.
 
 ### 2.2 A negative denominator currently scores as "cheapest"
 
-Found while checking §2.3. `relative_scores()` ranks with `rank(pct=True)` and
-`higher_better=False` for the valuation metrics, so a **negative** EV/EBITDA —
-a company with negative EBITDA, where the ratio is undefined — sorts as the most
-favorable value in its band:
+Found while checking §2.3. `relative_scores()` scores a value by its distance
+from the band median in MAD units, clipped to [-1, 1], then negates when
+`higher_better=False`:
+
+    med, mad = valid.median(), (valid - valid.median()).abs().median()
+    z = max(-1.0, min(1.0, (v - med) / (1.5 * spread)))
+    scores[idx] = z if higher_better else -z
+
+For a valuation metric this means an *undefined* ratio — a company whose EBITDA
+is negative — lands far below the median, clips to -1.0, and is negated to
+**+1.0: the most favorable score the scale can express.**
 
     Software — Infrastructure, EV/EBITDA, as scored on 2026-09-04
     (score 1.00 = deepest blue = most favorable vs peers)
@@ -76,9 +83,32 @@ Scale of the problem on 2026-09-04:
     forwardPE   153       1         7 (>80x)    8   (5%)
     ps          153       0         3 (>40x)    3   (2%)
 
-Sub-industries carrying a poisoned EV/EBITDA percentile: Software —
-Infrastructure (7 names), Semiconductors (4), Software — Applications (2),
-Semicap Equipment, Aerospace & Defense, Internet Retail.
+Sub-industries carrying a poisoned EV/EBITDA score: Software — Infrastructure
+(7 names), Semiconductors (4), Software — Applications (2), Semicap Equipment,
+Aerospace & Defense, Internet Retail.
+
+The damage is not confined to the offending cell. Because `med` and `mad` are
+computed over the column *including* the undefined values, they contaminate
+every other name in the band. Excluding NET and SNOW from Software —
+Infrastructure moves the band median from 94.13 to 303.90 and shifts every
+surviving score by about half the available scale:
+
+          evEbitda  before  after  shift
+    NET  -27887.75    1.00    --      --
+    SNOW    -93.92    0.45    --      --
+    ORCL     19.18    0.18   0.67   +0.49
+    MSFT     19.77    0.18   0.67   +0.49
+    FTNT     42.84    0.12   0.61   +0.49
+    PANW    145.42   -0.12   0.37   +0.49
+    ZS      462.38   -0.88  -0.37   +0.51
+    DDOG    885.52   -1.00  -1.00    0.00
+    CRWD   2020.94   -1.00  -1.00    0.00
+    MDB    2065.37   -1.00  -1.00    0.00
+
+Oracle and Microsoft at 19x are the cheapest names in that band on any honest
+reading, and the page renders them barely tinted. Fixing the guard is therefore
+not only about the 21 bad cells; it restores the signal on the ~130 good ones
+sharing a band with them.
 
 The same class of bug reaches `netDebtEbitda`, where it is worse, because the
 sign inverts rather than the magnitude exploding. Net debt divided by a
@@ -242,8 +272,9 @@ for this one metric depends on a second field.
 The rule is the one the store already applies at its write boundary — "a
 missing value writes no row", and its sibling `extract.is_degenerate_estimate`.
 An undefined ratio is not an extreme value; it is an absent one. Excluding it
-also repairs the percentiles of every *other* name in the band, since the rank
-denominator shrinks to the names that actually have a defined multiple.
+also repairs the scores of every *other* name in the band, because `med` and
+`mad` are computed over the surviving values (§2.2, measured at ~0.49 of scale
+for Software — Infrastructure).
 
 Expect visible change: 21 names stop being tinted on EV/EBITDA, 10 on trailing
 P/E, 8 on forward P/E, and BA plus the four near-zero-EBITDA software names stop
