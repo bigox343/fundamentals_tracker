@@ -678,6 +678,46 @@ def record_history(df, closes, closes_raw, est_rows, as_of, failed, own=None):
         conn.close()
 
 
+def own_history(conn, df) -> dict:
+    """(ticker, metric) -> own-range percentile, for pairs that passed the proof.
+
+    A pair that failed gets no entry, so the frame renders blank rather than
+    wrong. Non-fatal for the same reason record_history() is: no valuation
+    history must ever cost you the dashboard.
+
+    build_all() is the expensive step here (measured ~11s across the full
+    universe) and prove_xbrl.report() needs to run its proof against the
+    identical series -- so it is computed once, here, and handed to report()
+    as `built` rather than letting it rebuild the same thing a second time.
+    Measured separately those were 10.5s and 11.9s, ~22s added to every
+    dashboard build for one computation done twice.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import prove_xbrl
+        import valuation
+        tickers = sorted(df.ticker)
+        t0 = time.time()
+        series = valuation.build_all(conn, tickers)
+        t1 = time.time()
+        passed = prove_xbrl.report(conn, built=series)
+        t2 = time.time()
+        print(f"  own-history: build_all {t1 - t0:.1f}s, report {t2 - t1:.1f}s")
+        ok = {(r.ticker, r.metric) for r in passed.itertuples() if r.passed}
+        out = {}
+        for ticker, frame in series.items():
+            for metric in frame.columns:
+                if (ticker, metric) not in ok:
+                    continue
+                pct = valuation.own_percentile(frame[metric])
+                if pct is not None:
+                    out[(ticker, metric)] = pct
+        return out
+    except Exception as exc:  # noqa: BLE001
+        print(f"  own-history frame unavailable: {exc}", file=sys.stderr)
+        return {}
+
+
 def fetch_13f(force: bool = False) -> None:
     """Pull any 13F filing the store is missing, then ingest it.
 
@@ -911,8 +951,15 @@ def _run(args):
     print("Fetching proxy-ETF benchmarks...")
     proxies = fetch_proxies(df)
 
+    print("Computing own-history valuation percentiles...")
+    conn = history.connect()
+    try:
+        own = own_history(conn, df)
+    finally:
+        conn.close()
+
     html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS,
-                              DOMAINS)
+                              DOMAINS, own=own)
     out = ROOT / "dashboard.html"
     out.write_text(html, encoding="utf-8")
     print(f"\nWrote {out}  ({len(df)} companies)")

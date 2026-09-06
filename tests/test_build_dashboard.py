@@ -5,10 +5,22 @@ like yfinance's real auto_adjust=False response (a 'Adj Close'/'Close'/...
 MultiIndex over tickers), so these tests exercise the column-selection logic
 without ever leaving the machine.
 """
+import sys
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 import build_dashboard as bd
+import valuation
+
+# own_history() imports prove_xbrl the same way build_dashboard.py does --
+# by adding tools/ to sys.path and importing it by name -- so tests that
+# monkeypatch prove_xbrl.report must reach the very same module object.
+_TOOLS = Path(bd.__file__).resolve().parent / "tools"
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+import prove_xbrl
 
 
 def _fake_auto_adjust_false_response() -> pd.DataFrame:
@@ -61,3 +73,65 @@ def test_fetch_close_pair_maps_adj_close_and_close_to_the_right_series(monkeypat
 def test_fetch_close_pair_of_no_symbols_is_two_empty_frames():
     adjusted, raw = bd.fetch_close_pair([])
     assert adjusted.empty and raw.empty
+
+
+def _long_enough(values):
+    # own_percentile needs a full trading year (MIN_HISTORY=250) before it
+    # returns anything -- a shorter series is exactly what the second test
+    # below is checking gets skipped.
+    return pd.Series(values, dtype=float)
+
+
+def test_own_history_keeps_only_pairs_that_passed_the_proof(monkeypatch):
+    series = {
+        "AAPL": pd.DataFrame({"trailingPE": _long_enough(range(300))}),
+        "MSFT": pd.DataFrame({"trailingPE": _long_enough(range(300))}),
+    }
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    monkeypatch.setattr(prove_xbrl, "report", lambda conn, built=None: pd.DataFrame([
+        {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.001, "passed": True},
+        {"ticker": "MSFT", "metric": "trailingPE", "median_error": 0.5, "passed": False},
+    ]))
+    df = pd.DataFrame({"ticker": ["AAPL", "MSFT"]})
+    out = bd.own_history(object(), df)
+    assert ("AAPL", "trailingPE") in out
+    assert ("MSFT", "trailingPE") not in out, "a pair that failed the proof must not render"
+
+
+def test_own_history_skips_a_pair_that_passed_but_lacks_enough_history(monkeypatch):
+    series = {"AAPL": pd.DataFrame({"trailingPE": _long_enough(range(10))})}
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    monkeypatch.setattr(prove_xbrl, "report", lambda conn, built=None: pd.DataFrame([
+        {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
+    ]))
+    df = pd.DataFrame({"ticker": ["AAPL"]})
+    out = bd.own_history(object(), df)
+    assert out == {}, "MIN_HISTORY is not to be re-floored, but it must still be honored"
+
+
+def test_own_history_hands_its_series_to_report_instead_of_letting_it_rebuild(monkeypatch):
+    # The whole point of Task 12's amendment 2: build_all() is ~11s, and
+    # prove_xbrl.report() must reuse this call's result rather than
+    # recomputing the identical series itself.
+    series = {"AAPL": pd.DataFrame({"trailingPE": _long_enough(range(300))})}
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    captured = {}
+
+    def _fake_report(conn, built=None):
+        captured["built"] = built
+        return pd.DataFrame([{"ticker": "AAPL", "metric": "trailingPE",
+                              "median_error": 0.0, "passed": True}])
+
+    monkeypatch.setattr(prove_xbrl, "report", _fake_report)
+    bd.own_history(object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    assert captured["built"] is series
+
+
+def test_own_history_is_non_fatal_when_something_raises(monkeypatch, capsys):
+    def _boom(conn, tickers):
+        raise RuntimeError("SEC is down")
+
+    monkeypatch.setattr(valuation, "build_all", _boom)
+    out = bd.own_history(object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    assert out == {}
+    assert "own-history frame unavailable" in capsys.readouterr().err

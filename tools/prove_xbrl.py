@@ -46,15 +46,23 @@ def summarize(results: dict) -> pd.DataFrame:
          for (t, m), (e, ok) in sorted(results.items())])
 
 
-def report(conn) -> pd.DataFrame:
-    """Prove every (ticker, metric) against Yahoo's own published value."""
+def report(conn, built: dict | None = None) -> pd.DataFrame:
+    """Prove every (ticker, metric) against Yahoo's own published value.
+
+    `built` lets a caller that has already run valuation.build_all() (the
+    dashboard's own-history frame does, to compute percentiles from the same
+    series) hand the result in rather than pay for it a second time -- on the
+    live store that call is ~11s, so calling it twice roughly doubles the
+    dashboard's build time for one computation done once already.
+    """
     import valuation
     snap = pd.read_sql_query(
         "SELECT ticker, as_of, metric, value FROM metrics "
         "WHERE period_type='snapshot' AND metric IN "
         "('trailingPE','ps','evEbitda','fcfYield')", conn)
-    tickers = sorted(snap.ticker.unique())
-    built = valuation.build_all(conn, tickers)
+    if built is None:
+        tickers = sorted(snap.ticker.unique())
+        built = valuation.build_all(conn, tickers)
     results = {}
     for ticker, frame in built.items():
         ref_all = snap[snap.ticker == ticker]

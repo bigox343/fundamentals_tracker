@@ -1,9 +1,13 @@
 import importlib.util
 import math
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import pytest
+
+import history
+import valuation
 
 _spec = importlib.util.spec_from_file_location(
     "prove_xbrl", Path(__file__).parent.parent / "tools" / "prove_xbrl.py")
@@ -98,3 +102,60 @@ def test_report_marks_a_failing_pair_as_not_passed():
     assert set(frame.columns) == {"ticker", "metric", "median_error", "passed"}
     assert not frame.set_index(["ticker", "metric"]).loc[
         ("NET", "evEbitda"), "passed"]
+
+
+def _store_with_two_snapshots():
+    # MIN_OVERLAP is 2: a single overlapping day is not evidence (see
+    # test_too_few_overlapping_days_cannot_pass above), so a fixture with only
+    # one snapshot date would fail the proof for a reason unrelated to what
+    # these two tests are checking. Two dates keep the fixture honest.
+    conn = sqlite3.connect(":memory:")
+    history.ensure_schema(conn)
+    conn.execute(
+        "INSERT INTO metrics VALUES "
+        "('AAPL','2026-01-02','snapshot','trailingPE','',30.0,'x')"
+    )
+    conn.execute(
+        "INSERT INTO metrics VALUES "
+        "('AAPL','2026-01-05','snapshot','trailingPE','',31.0,'x')"
+    )
+    conn.commit()
+    return conn
+
+
+def _built_frame():
+    return {"AAPL": pd.DataFrame(
+        {"trailingPE": [30.0, 31.0]},
+        index=pd.DatetimeIndex(["2026-01-02", "2026-01-05"]))}
+
+
+def test_report_uses_a_prebuilt_series_instead_of_running_build_all(monkeypatch):
+    # own_history in build_dashboard.py already ran build_all() once (it is
+    # ~11s over the full universe) to compute the own-history percentile;
+    # report() must reuse that result rather than paying for it again.
+    conn = _store_with_two_snapshots()
+
+    def _boom(*_a, **_k):
+        raise AssertionError("build_all must not run when `built` is supplied")
+
+    monkeypatch.setattr(valuation, "build_all", _boom)
+    out = prove.report(conn, built=_built_frame())
+    assert out.set_index(["ticker", "metric"]).loc[
+        ("AAPL", "trailingPE"), "passed"]
+
+
+def test_report_builds_its_own_series_when_none_is_supplied(monkeypatch):
+    # The standalone call site (running prove_xbrl.py on its own) has no
+    # prebuilt series to hand in, so report() must still compute one itself.
+    conn = _store_with_two_snapshots()
+    calls = []
+
+    def _fake_build_all(_conn, tickers):
+        calls.append(list(tickers))
+        return _built_frame()
+
+    monkeypatch.setattr(valuation, "build_all", _fake_build_all)
+    out = prove.report(conn)
+    assert calls == [["AAPL"]], "build_all must run exactly once when built=None"
+    assert out.set_index(["ticker", "metric"]).loc[
+        ("AAPL", "trailingPE"), "passed"]

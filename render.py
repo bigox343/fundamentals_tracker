@@ -169,7 +169,7 @@ def band_perf(band: str, proxies: dict) -> str:
 
 def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                    metrics: list, universe: dict, group_labels: dict,
-                   domains: dict) -> str:
+                   domains: dict, own: dict | None = None) -> str:
     gcount = {}
     for _k, _l, g, _f, _hb in metrics:
         gcount[g] = gcount.get(g, 0) + 1
@@ -244,6 +244,12 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                     attrs += f" data-ss='{ss:.4f}'"
                 if sc is not None:
                     attrs += f" data-sc='{sc:.4f}'"
+                # A pair the proof gate rejected gets no percentile here, so
+                # the own-history frame renders blank for it rather than a
+                # number nobody has verified -- see prove_xbrl.report().
+                oh = (own or {}).get((tk, key))
+                if oh is not None:
+                    attrs += f" data-oh='{oh:.4f}'"
                 # A missing score is ambiguous on its own: test_domains.py's
                 # 3-name band (-5.0, -3.0, 12.0) excludes the two negatives,
                 # leaving one valid value under relative_scores' floor of
@@ -541,6 +547,14 @@ TOOLBAR = """
   <button class="btn on" data-grp="prof" aria-pressed="true">Profitability</button>
   <button class="btn on" data-grp="bal" aria-pressed="true">Balance</button>
   <span class="tsep"></span>
+  <span class="tlab">Frame</span>
+  <select id="frame">
+    <option value="peers">vs peers</option>
+    <option value="own">vs own history</option>
+    <option value="c1w" disabled>change 1w (soon)</option>
+    <option value="c1m" disabled>change 1m (soon)</option>
+  </select>
+  <span class="tsep"></span>
   <span class="tlab">Tint vs</span>
   <select id="tint">
     <option value="ss">sub-industry</option>
@@ -564,7 +578,7 @@ JS_TMPL = """
 var KEYS=__KEYS__, LABELS=__LABELS__, STAMP=__STAMP__;
 var $=function(s){return document.querySelector(s);};
 var $$=function(s){return Array.prototype.slice.call(document.querySelectorAll(s));};
-var st={tint:'ss',flat:false,q:'',groups:{val:1,grow:1,prof:1,bal:1}};
+var st={tint:'ss',frame:'peers',flat:false,q:'',groups:{val:1,grow:1,prof:1,bal:1}};
 
 // snapshot the band structure once; all later ordering works off this model
 var secs=$$('section.sector').map(function(sec){
@@ -637,9 +651,26 @@ function tintOf(s){
   var a=Math.min(0.34,Math.abs(s)*0.34);
   return 'rgba('+(s>0?'37,106,191':'208,59,59')+','+a.toFixed(3)+')';
 }
+// An own-history percentile is 0..1 where 0 is the cheapest the name has
+// ever been. The peer scale is -1..1 with +1 favorable, so a cheap multiple
+// (low percentile) must map to +1 -- hence 1-2*p rather than p itself.
+// c1w/c1m read from data attributes that do not exist until Task 14; their
+// <option>s are disabled in the markup so this branch is unreachable through
+// the UI, but frameScore still returns null for them rather than throwing.
+function frameScore(td){
+  if(st.frame==='peers'){
+    return st.tint==='off'?null
+      :td.getAttribute(st.tint==='ss'?'data-ss':'data-sc');
+  }
+  if(st.frame==='own'){
+    var p=td.getAttribute('data-oh');
+    return p===null?null:String(1-2*parseFloat(p));
+  }
+  return td.getAttribute(st.frame==='c1w'?'data-c1w':'data-c1m');
+}
 function applyTint(){
   $$('td.num').forEach(function(td){
-    var v=st.tint==='off'?null:td.getAttribute(st.tint==='ss'?'data-ss':'data-sc');
+    var v=frameScore(td);
     td.style.background=(v===null)?'':tintOf(parseFloat(v));
   });
 }
@@ -700,6 +731,13 @@ function setTheme(t){
 // ---- wiring ----
 $('#q').addEventListener('input',function(e){st.q=e.target.value;applyFilter();});
 $('#tint').addEventListener('change',function(e){st.tint=e.target.value;applyTint();});
+$('#frame').addEventListener('change',function(e){
+  st.frame=e.target.value;
+  // the basis only means something for the peer frame -- greyed out rather
+  // than hidden, so it is visibly "not applicable here" and not "broken"
+  $('#tint').disabled=(st.frame!=='peers');
+  applyTint();
+});
 $$('.btn[data-grp]').forEach(function(b){
   b.addEventListener('click',function(){
     var g=b.dataset.grp;st.groups[g]=!st.groups[g];applyGroups();
@@ -773,12 +811,12 @@ def build_js(metrics: list) -> str:
 
 def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
                  metrics: list, universe: dict, group_labels: dict,
-                 domains: dict) -> str:
+                 domains: dict, own: dict | None = None) -> str:
     asof = spx.get("asof", datetime.now(timezone.utc))
     asof_s = asof.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     sectors = "".join(
         render_sector(sec, df[df.sector == sec], proxies, metrics, universe,
-                      group_labels, domains)
+                      group_labels, domains, own=own)
         for sec in universe
     )
     spx_html = render_spx(spx, df, proxies, universe)

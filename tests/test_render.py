@@ -94,3 +94,58 @@ def test_a_thin_valid_band_leaves_a_well_defined_cell_unmarked():
     assert "undef" in row("B")
     assert "undef" not in row("C")
     assert "data-ss" not in row("C")
+
+
+def _one_band(**extra):
+    # marketCap is required by render_sector's per-band sort (sort_values on
+    # it); the brief's original fixture omitted it, which fails with a bare
+    # KeyError rather than exercising anything about own-history -- exactly
+    # the hollow-fixture trap flagged for this task.
+    df = pd.DataFrame({
+        "ticker": ["ORCL", "MSFT", "FTNT"],
+        "name": ["Oracle", "Microsoft", "Fortinet"],
+        "subindustry": ["Infra"] * 3,
+        "marketCap": [3e11, 3e12, 6e10],
+        "trailingPE": [19.18, 19.77, 42.84],
+    }).set_index("ticker", drop=False)
+    return df
+
+
+def test_a_cell_carries_its_own_history_percentile():
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {},
+        own={("ORCL", "trailingPE"): 0.12},
+    )
+    row = html[html.index('data-tk="ORCL"'):]
+    assert "data-oh='0.1200'" in row[:row.index("</tr>")]
+
+
+def test_a_pair_that_failed_the_proof_carries_no_own_history():
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {}, own={},
+    )
+    assert "data-oh" not in html
+
+
+def test_the_toolbar_offers_every_frame():
+    for value in ("peers", "own", "c1w", "c1m"):
+        assert f'value="{value}"' in render.TOOLBAR
+
+
+def test_the_change_frame_options_are_disabled_until_task_14():
+    # data-c1w/data-c1m do not exist yet, so painting the table from them
+    # would render every cell blank -- indistinguishable from a bug. The
+    # options stay in the markup (the test above still proves every frame is
+    # offered) but disabled, with a "(soon)" suffix, so the gap reads as
+    # deliberate.
+    soon = render.TOOLBAR[render.TOOLBAR.index('value="c1w"'):]
+    assert "disabled" in soon[:soon.index(">")]
+    assert "(soon)" in soon[:soon.index("</option>")]
+    soon = render.TOOLBAR[render.TOOLBAR.index('value="c1m"'):]
+    assert "disabled" in soon[:soon.index(">")]
+    assert "(soon)" in soon[:soon.index("</option>")]
+    for live in ("peers", "own"):
+        opt = render.TOOLBAR[render.TOOLBAR.index(f'value="{live}"'):]
+        assert "disabled" not in opt[:opt.index(">")]
