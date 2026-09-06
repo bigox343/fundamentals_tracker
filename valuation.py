@@ -392,14 +392,34 @@ def multiple_series(ticker: str, facts_by_tag: dict,
     applies: a negative denominator makes the multiple absent, not cheap.
     """
     dates = pd.DatetimeIndex(closes_raw.index)
-    shares = shares_series(facts_by_tag.get("shares", []), dates,
-                           dei_facts=facts_by_tag.get("sharesOutstanding", []))
-    cap = closes_raw.astype(float) * shares
+    # Two share bases, because these are two kinds of multiple.
+    #
+    # An aggregate multiple -- P/S, EV/EBITDA -- divides what the whole company
+    # costs by what the whole company earns or sells, so it wants the actual
+    # count outstanding. Measured against Yahoo's own market cap, that basis is
+    # exact: median error 0.000004%, and P/S lands at a 0.00% median.
+    #
+    # P/E is not an aggregate multiple. It is price divided by earnings per
+    # share, and EPS is defined on the WEIGHTED AVERAGE diluted count -- an
+    # average over the period the earnings were earned, not a snapshot on the
+    # day. Using the outstanding count here silently reprices a year of
+    # earnings onto today's share base. Measured over 123 names, per-share
+    # basis against Yahoo's trailingPE: median error 0.96% and 51% within 1%,
+    # against 1.58% and 33% for the outstanding basis.
+    #
+    # Fixing market cap made P/E look WORSE before this split, which is how
+    # the difference surfaced: a market cap 0.9% low had been cancelling most
+    # of the per-share gap, and correcting one exposed the other.
+    outstanding = shares_series(facts_by_tag.get("shares", []), dates,
+                                dei_facts=facts_by_tag.get("sharesOutstanding", []))
+    weighted = shares_series(facts_by_tag.get("shares", []), dates)
+    cap = closes_raw.astype(float) * outstanding
 
     out = pd.DataFrame(index=dates)
 
     earnings = _ttm(facts_by_tag, "netIncome", dates)
-    out["trailingPE"] = (cap / earnings).where(earnings > 0)
+    per_share_cap = closes_raw.astype(float) * weighted
+    out["trailingPE"] = (per_share_cap / earnings).where(earnings > 0)
 
     revenue = _ttm(facts_by_tag, "revenue", dates)
     out["ps"] = (cap / revenue).where(revenue > 0)

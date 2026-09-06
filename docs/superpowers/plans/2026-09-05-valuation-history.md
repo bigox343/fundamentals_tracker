@@ -2373,6 +2373,36 @@ concept chain or the EBITDA definition is wrong, not that the data is bad."
 
 ---
 
+## Task 11.5: An honest TTM, and the right share basis for market cap
+
+Inserted after Task 11's proof gate failed on all four metrics. The brief is at
+`.superpowers/sdd/2026-09-05-valuation-history/task-11.5-brief.md`; the
+diagnosis is the "Task 11 GATE" entry in that directory's `progress.md`.
+
+The gate's single failure number was hiding two different results. `trailingPE`
+and `ps` are sound -- a quarter of names reconstruct to within 0.31%, two
+thirds within 2% -- and fail only because `PASS_TOLERANCE` is 1% while their
+median error is ~1%, so about half fail by construction. Market cap alone
+carries 0.91% of that, because the store used
+`WeightedAverageNumberOfDilutedSharesOutstanding`: the right concept for EPS,
+the wrong one for market cap. Switching to `dei:EntityCommonStockSharesOut-
+standing` makes six of seven probed tickers exact (MCD 100.00% -> 0.00%).
+
+`fcfYield` is genuinely broken, structurally: cash-flow statements are
+cumulative, `quarterly()` only reconstructs the annual case, and `ttm_at` never
+checked that its four quarters span a year -- so it summed four quarters spread
+across three years. That guard matters more than the metric that revealed it.
+
+`evEbitda` is broken for two reasons, one of them unfixable here: `debtLT` is
+absent for 42 of 153 tickers, and Yahoo's `enterpriseToEbitda` uses a non-GAAP
+adjusted EBITDA that cannot be reconstructed from GAAP tags at all. Left to the
+proof harness to suppress, per the design's own rule that a name ends up with
+no EV/EBITDA history rather than a wrong one.
+
+**Gate:** market cap median error against Yahoo below 0.2%, from 0.91%.
+
+---
+
 ## Task 12: The frame select and the own-history frame
 
 **Files:**

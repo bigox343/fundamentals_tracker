@@ -336,6 +336,30 @@ def test_market_cap_uses_the_unadjusted_close_and_adjusted_shares():
     assert out.loc[dates[0], "trailingPE"] == pytest.approx(50000 / 460, rel=1e-6)
 
 
+def test_pe_uses_the_weighted_average_basis_and_ps_uses_shares_outstanding():
+    # Two kinds of multiple, two share bases. P/S divides what the whole
+    # company costs by what it sells, so it takes the actual count
+    # outstanding. P/E is price over earnings PER SHARE, and EPS is defined on
+    # the weighted average diluted count -- using the outstanding count there
+    # reprices a year of earnings onto today's share base. The two counts are
+    # deliberately far apart here so a single-basis implementation cannot pass.
+    dates = pd.to_datetime(["2026-08-01"])
+    facts = {
+        "netIncome": _four_quarters(),
+        "revenue": _four_quarters(),
+        "shares": [_q("2026-06-30", "2026-07-31", 1000.0, "2026-04-01",
+                      2026, "Q2")],
+        "sharesOutstanding": [Fact(
+            "T", "EntityCommonStockSharesOutstanding", "", "2026-06-30",
+            2026, "Q2", "10-Q", "2026-07-31", 2000.0)],
+    }
+    out = valuation.multiple_series("T", facts, pd.Series([50.0], index=dates))
+    assert out.loc[dates[0], "ps"] == pytest.approx(50 * 2000 / 460, rel=1e-6), \
+        "P/S takes the outstanding count"
+    assert out.loc[dates[0], "trailingPE"] == pytest.approx(
+        50 * 1000 / 460, rel=1e-6), "P/E takes the weighted average count"
+
+
 def test_a_negative_ttm_earnings_yields_no_pe_rather_than_a_negative_one():
     dates = pd.to_datetime(["2026-08-01"])
     losses = [_q(e, f, -50.0, s, y, p) for e, f, s, y, p in [
