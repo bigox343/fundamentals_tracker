@@ -731,10 +731,30 @@ def own_history(conn, df) -> tuple[dict, dict]:
             enc = render.encode_series(frame[cols])
             if enc:
                 payload[ticker] = enc
-        return out, payload
+
+        # The change frames run off the same `ok` set, for the same reason:
+        # a change derived from a series the proof rejected is exactly as
+        # wrong as the level, and reads like news, so it is more persuasive.
+        points = frozenset(k for k, _l, _g, f, _hb in METRICS if f == "pct")
+        derived = valuation.changes(series, ok, points)
+        # Nested rather than sharing the outer handler: the snapshot table is
+        # a separate source with a separate way to fail, and losing the change
+        # frames must not also cost the own-history percentiles that are
+        # already computed and correct by this point.
+        try:
+            # Metrics with no derived daily series fall back to `snapshot`,
+            # whose depth is whatever it has accrued -- so c1w resolves and
+            # c1m does not yet, and a window with too little depth yields no
+            # entry rather than a zero.
+            derived.update(valuation.snapshot_changes(
+                conn, points, skip=frozenset(m for _t, m in ok)))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  snapshot change frames unavailable: {exc}",
+                  file=sys.stderr)
+        return out, payload, derived
     except Exception as exc:  # noqa: BLE001
         print(f"  own-history frame unavailable: {exc}", file=sys.stderr)
-        return {}, {}
+        return {}, {}, {}
 
 
 def fetch_13f(force: bool = False) -> None:
@@ -970,15 +990,16 @@ def _run(args):
     print("Fetching proxy-ETF benchmarks...")
     proxies = fetch_proxies(df)
 
-    print("Computing own-history valuation percentiles...")
+    print("Computing own-history percentiles and change frames...")
     conn = history.connect()
     try:
-        own, own_series = own_history(conn, df)
+        own, own_series, changes = own_history(conn, df)
     finally:
         conn.close()
 
     html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS,
-                              DOMAINS, own=own, series=own_series)
+                              DOMAINS, own=own, series=own_series,
+                              changes=changes)
     out = ROOT / "dashboard.html"
     out.write_text(html, encoding="utf-8")
     print(f"\nWrote {out}  ({len(df)} companies)")

@@ -195,18 +195,94 @@ def test_the_toolbar_offers_every_frame():
         assert f'value="{value}"' in render.TOOLBAR
 
 
-def test_the_change_frame_options_are_disabled_until_task_14():
-    # data-c1w/data-c1m do not exist yet, so painting the table from them
-    # would render every cell blank -- indistinguishable from a bug. The
-    # options stay in the markup (the test above still proves every frame is
-    # offered) but disabled, with a "(soon)" suffix, so the gap reads as
-    # deliberate.
-    soon = render.TOOLBAR[render.TOOLBAR.index('value="c1w"'):]
-    assert "disabled" in soon[:soon.index(">")]
-    assert "(soon)" in soon[:soon.index("</option>")]
-    soon = render.TOOLBAR[render.TOOLBAR.index('value="c1m"'):]
-    assert "disabled" in soon[:soon.index(">")]
-    assert "(soon)" in soon[:soon.index("</option>")]
-    for live in ("peers", "own"):
+def test_every_frame_option_is_selectable_now_that_changes_exist():
+    # Task 12 shipped c1w and c1m disabled with a "(soon)" suffix, because
+    # data-c1w/data-c1m did not exist and selecting them would have painted an
+    # entirely blank table -- indistinguishable from a bug. This is the task
+    # that earns them, so the placeholder has to go with it: a control left
+    # greyed out after its data arrives is worse than one that was never there.
+    for live in ("peers", "own", "c1w", "c1m"):
         opt = render.TOOLBAR[render.TOOLBAR.index(f'value="{live}"'):]
-        assert "disabled" not in opt[:opt.index(">")]
+        assert "disabled" not in opt[:opt.index(">")], live
+        assert "(soon)" not in opt[:opt.index("</option>")], live
+
+
+def test_a_cell_carries_both_the_raw_change_and_the_scaled_one():
+    # Two attributes because they answer different questions: the raw value
+    # drives the direction arrow, the scaled one drives the tint. Feeding the
+    # raw log change to the tint would paint a large weekly move (0.09) at 9%
+    # of full strength.
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {},
+        changes={("ORCL", "trailingPE", "c1w"): 0.045},
+    )
+    row = html[html.index('data-tk="ORCL"'):]
+    row = row[:row.index("</tr>")]
+    assert "data-c1w='0.04500'" in row
+    # lower-is-better, so a RISING multiple is unfavorable: 0.045/0.09 = 0.5,
+    # negated to -0.5
+    assert "data-c1ws='-0.5000'" in row
+
+
+def test_the_change_tint_is_signed_by_whether_higher_is_better():
+    # The same +4.5% move on a higher-is-better metric must read favorable.
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Rev Gr", "grow", "x", True)],
+        {"TMT": ["Infra"]}, {"val": "Valuation", "grow": "Growth"}, {},
+        changes={("ORCL", "trailingPE", "c1w"): 0.045},
+    )
+    row = html[html.index('data-tk="ORCL"'):]
+    assert "data-c1ws='0.5000'" in row[:row.index("</tr>")]
+
+
+def test_a_percentage_metric_is_scaled_on_the_points_span_not_the_log_one():
+    # 1.5 points against the 3.0-point span is half a tint. Scaled on the log
+    # span (0.09) it would saturate more than sixteen times over.
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Net %", "prof", "pct", True)],
+        {"TMT": ["Infra"]}, {"val": "Valuation", "prof": "Profitability"}, {},
+        changes={("ORCL", "trailingPE", "c1w"): 1.5},
+    )
+    row = html[html.index('data-tk="ORCL"'):]
+    assert "data-c1ws='0.5000'" in row[:row.index("</tr>")]
+
+
+def test_a_cell_with_no_change_carries_no_change_attribute():
+    # Absent must stay distinct from zero: "we have not watched long enough"
+    # and "it did not move" are different statements.
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {}, changes={},
+    )
+    assert "data-c1w" not in html
+
+
+def test_the_change_frames_paint_from_the_scaled_attribute():
+    # Pinned at the JS-source level: reading data-c1w instead of data-c1ws
+    # would tint a large move at a tenth of its strength.
+    assert "data-c1ws" in render.JS_TMPL
+    assert "data-c1ms" in render.JS_TMPL
+
+
+def test_the_direction_arrow_reads_the_raw_change_and_has_a_deadband():
+    assert "function arrows()" in render.JS_TMPL
+    assert "getAttribute('data-c1w')" in render.JS_TMPL
+    assert "DEADBAND" in render.JS_TMPL
+    assert "arrows();" in render.JS_TMPL, "defined but never called"
+
+
+def test_the_arrow_style_cannot_change_a_cell_metric():
+    # No-new-columns applies to height too. line-height:1 and a font smaller
+    # than the row's own keep the span from growing the cell it sits in.
+    rule = render.CSS[render.CSS.index(".arw{"):]
+    rule = rule[:rule.index("}")]
+    assert "line-height:1" in rule
+    assert "font-size:8px" in rule
+    # Split on ";" so a bare "height" declaration is caught without matching
+    # the "height:" inside "line-height:", which is the one that makes it safe.
+    props = {d.split(":")[0].strip() for d in rule.split("{")[1].split(";") if d}
+    for forbidden in ("padding", "height", "width", "margin-top", "float"):
+        assert forbidden not in props, forbidden
+    assert props <= {"font-size", "line-height", "margin-left", "color",
+                     "display", "vertical-align"}, props

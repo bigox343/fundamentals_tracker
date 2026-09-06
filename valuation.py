@@ -20,6 +20,7 @@ not.
 """
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import pandas as pd
@@ -546,4 +547,80 @@ def build_all(conn, tickers) -> dict:
                     culprit = name
                     break
             print(f"build_all: skipping {ticker} -- {culprit}: {exc}")
+    return out
+
+
+# Trading sessions, matching the convention already used for ret1m/ret6m.
+WINDOWS = {"c1w": 5, "c1m": 22}
+
+
+def change(series: pd.Series, sessions: int, points: bool = False) -> float | None:
+    """Change over `sessions`, or None when the history is too short.
+
+    Two kinds, because the metrics are two kinds. A multiple, a price or a
+    dollar total moves multiplicatively, and a log ratio is the quantity that
+    decomposes -- dln(multiple) = dln(price) - dln(fundamental) -- which is
+    what separates a market move from a source revision. A margin, a growth
+    rate or a return is already a percentage, and the question a reader asks
+    of it is "how many points did it move", not "by what factor". A log ratio
+    is also undefined for the ones that go negative, and revGrowth, epsGrowth,
+    roe and the margins all do -- so a log-only implementation would go silent
+    on exactly the names most worth noticing.
+    """
+    clean = pd.Series(series).dropna()
+    if len(clean) < sessions + 1:
+        return None
+    now, then = float(clean.iloc[-1]), float(clean.iloc[-1 - sessions])
+    if points:
+        return now - then
+    if now <= 0 or then <= 0:
+        return None
+    return math.log(now / then)
+
+
+def changes(built: dict, proven: set, points_metrics: frozenset) -> dict:
+    """(ticker, metric, window) -> change, for proven pairs only.
+
+    The proof filter is not optional. Without it this walks every column of
+    every frame and emits a change for anything with enough history --
+    measured on the live store, 652 values including 104 evEbitda and 26
+    fcfYield, whose LEVELS this branch refuses to render because they
+    reconstruct to a 10.6% and 43% median error. A change reads like news, so
+    it is more persuasive than a level and worse to get wrong.
+    """
+    out: dict = {}
+    for ticker, frame in built.items():
+        for metric in frame.columns:
+            if (ticker, metric) not in proven:
+                continue
+            for name, sessions in WINDOWS.items():
+                value = change(frame[metric], sessions,
+                               points=metric in points_metrics)
+                if value is not None:
+                    out[(ticker, metric, name)] = value
+    return out
+
+
+def snapshot_changes(conn, points_metrics: frozenset,
+                     skip: frozenset = frozenset()) -> dict:
+    """The same, for metrics that only exist in the snapshot table.
+
+    These have no derived daily series, so their depth is whatever `snapshot`
+    has accrued -- 16 dates as of 2026-09-06, which covers c1w and cannot
+    cover c1m. A window with too little depth yields no entry at all rather
+    than a zero: "we have not watched long enough" and "it did not move" are
+    different statements and must not render alike.
+    """
+    frame = pd.read_sql_query(
+        "SELECT ticker, as_of, metric, value FROM metrics "
+        "WHERE period_type = 'snapshot'", conn)
+    out: dict = {}
+    for (ticker, metric), group in frame.groupby(["ticker", "metric"]):
+        if metric in skip:
+            continue
+        series = group.sort_values("as_of").value
+        for name, sessions in WINDOWS.items():
+            value = change(series, sessions, points=metric in points_metrics)
+            if value is not None:
+                out[(ticker, metric, name)] = value
     return out

@@ -1,3 +1,4 @@
+import math
 import sqlite3
 
 import pandas as pd
@@ -505,3 +506,65 @@ def test_build_all_skips_a_ticker_whose_facts_trip_the_period_shape_guard():
     out = valuation.build_all(conn, ["GOOD", "BAD"])
     assert "BAD" not in out, "the offending ticker must be skipped, not raised"
     assert "GOOD" in out, "a bad ticker must not take a good one down with it"
+
+
+def test_change_is_a_log_ratio_over_the_window():
+    import math
+    s = pd.Series([100.0] * 20 + [110.0])
+    assert valuation.change(s, 5) == pytest.approx(math.log(1.10), rel=1e-6)
+
+
+def test_change_returns_nothing_when_the_window_exceeds_the_history():
+    assert valuation.change(pd.Series([1.0, 2.0, 3.0]), 22) is None
+
+
+def test_change_ignores_gaps_rather_than_treating_them_as_zero():
+    s = pd.Series([100.0, float("nan"), float("nan"), float("nan"), 110.0])
+    assert valuation.change(s, 4) is None, "four sessions need five clean points"
+    assert valuation.change(s, 1) == pytest.approx(math.log(1.10), rel=1e-6)
+
+
+def test_a_flat_series_changes_by_zero_not_by_nothing():
+    assert valuation.change(pd.Series([50.0] * 30), 5) == pytest.approx(0.0)
+
+
+def test_a_percentage_metric_changes_in_points_not_by_a_factor():
+    # A margin that went 20% -> 22% moved two points. A log ratio would call
+    # that 0.0953 and put it on the same scale as a multiple re-rating 10%,
+    # which is a different kind of statement about a different kind of number.
+    s = pd.Series([20.0] * 20 + [22.0])
+    assert valuation.change(s, 5, points=True) == pytest.approx(2.0)
+
+
+def test_a_negative_percentage_metric_still_has_a_change():
+    # revGrowth, epsGrowth, roe and the margins all go negative. A log-only
+    # implementation returns None for exactly these -- going silent on the
+    # names most worth noticing.
+    s = pd.Series([-5.0] * 20 + [-2.0])
+    assert valuation.change(s, 5) is None, "a log ratio cannot describe this"
+    assert valuation.change(s, 5, points=True) == pytest.approx(3.0)
+
+
+def _frame(values):
+    idx = pd.date_range("2026-01-01", periods=len(values), freq="B")
+    return pd.DataFrame({"trailingPE": values, "evEbitda": values}, index=idx)
+
+
+def test_changes_emits_nothing_for_a_pair_that_failed_the_proof():
+    # The filter is the whole point. Unfiltered, this walks every column and
+    # ships a change for evEbitda -- a multiple whose LEVEL this branch
+    # refuses to render because it reconstructs to a 10.6% median error.
+    built = {"T": _frame([100.0] * 20 + [110.0])}
+    out = valuation.changes(built, {("T", "trailingPE")}, frozenset())
+    assert ("T", "trailingPE", "c1w") in out
+    assert not any(m == "evEbitda" for _t, m, _w in out), \
+        "an unproven series must not reach the page as a change either"
+
+
+def test_changes_uses_the_points_kind_for_the_metrics_that_need_it():
+    built = {"T": _frame([20.0] * 20 + [22.0])}
+    proven = {("T", "trailingPE")}
+    log_out = valuation.changes(built, proven, frozenset())
+    pt_out = valuation.changes(built, proven, frozenset({"trailingPE"}))
+    assert log_out[("T", "trailingPE", "c1w")] == pytest.approx(math.log(1.1))
+    assert pt_out[("T", "trailingPE", "c1w")] == pytest.approx(2.0)

@@ -102,7 +102,7 @@ def test_own_history_keeps_only_pairs_that_passed_the_proof(monkeypatch):
         {"ticker": "MSFT", "metric": "trailingPE", "median_error": 0.5, "passed": False},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL", "MSFT"]})
-    out, _ = bd.own_history(object(), df)
+    out, _payload, _changes = bd.own_history(object(), df)
     assert ("AAPL", "trailingPE") in out
     assert ("MSFT", "trailingPE") not in out, "a pair that failed the proof must not render"
 
@@ -114,7 +114,7 @@ def test_own_history_skips_a_pair_that_passed_but_lacks_enough_history(monkeypat
         {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL"]})
-    out, payload = bd.own_history(object(), df)
+    out, payload, _changes = bd.own_history(object(), df)
     assert out == {}, "MIN_HISTORY is not to be re-floored, but it must still be honored"
     assert payload == {}, "a pair with no percentile must not be embedded as a series either"
 
@@ -142,7 +142,7 @@ def test_own_history_series_payload_matches_the_percentile_set_exactly(monkeypat
         {"ticker": "AAPL", "metric": "ps", "median_error": 0.0, "passed": True},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL"]})
-    out, payload = bd.own_history(object(), df)
+    out, payload, _changes = bd.own_history(object(), df)
     assert set(out) == {("AAPL", "trailingPE")}
     assert set(payload["AAPL"]) == {"trailingPE"}, (
         "ps passed the proof but has no percentile, so it must not be embedded"
@@ -173,7 +173,46 @@ def test_own_history_is_non_fatal_when_something_raises(monkeypatch, capsys):
         raise RuntimeError("SEC is down")
 
     monkeypatch.setattr(valuation, "build_all", _boom)
-    out, payload = bd.own_history(object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    out, payload, changes = bd.own_history(
+        object(), pd.DataFrame({"ticker": ["AAPL"]}))
     assert out == {}
     assert payload == {}
     assert "own-history frame unavailable" in capsys.readouterr().err
+
+
+def test_own_history_change_frames_exclude_pairs_that_failed_the_proof(monkeypatch):
+    # Measured on the live store, an unfiltered changes() emits 652 values
+    # including 104 evEbitda and 26 fcfYield -- multiples whose LEVELS this
+    # branch refuses to render. A change reads like news, so it is more
+    # persuasive than a level and worse to get wrong.
+    series = {"AAPL": pd.DataFrame({
+        "trailingPE": _long_enough(range(300)),
+        "evEbitda": _long_enough(range(300)),
+    })}
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    monkeypatch.setattr(prove_xbrl, "report", lambda conn, built=None: pd.DataFrame([
+        {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
+        {"ticker": "AAPL", "metric": "evEbitda", "median_error": 0.5, "passed": False},
+    ]))
+    _out, _payload, changes = bd.own_history(
+        object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    assert ("AAPL", "trailingPE", "c1w") in changes
+    assert not any(m == "evEbitda" for _t, m, _w in changes)
+
+
+def test_a_snapshot_failure_costs_the_change_frames_but_not_the_percentiles(monkeypatch):
+    # The two sources fail independently. snapshot_changes reads a table the
+    # derived series never touches, so losing it must not discard percentiles
+    # that are already computed and correct.
+    series = {"AAPL": pd.DataFrame({"trailingPE": _long_enough(range(300))})}
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    monkeypatch.setattr(prove_xbrl, "report", lambda conn, built=None: pd.DataFrame([
+        {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
+    ]))
+    def boom(*a, **k):
+        raise RuntimeError("no snapshot table")
+    monkeypatch.setattr(valuation, "snapshot_changes", boom)
+    out, _payload, changes = bd.own_history(
+        object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    assert ("AAPL", "trailingPE") in out, "percentiles must survive"
+    assert ("AAPL", "trailingPE", "c1w") in changes, "derived changes too"

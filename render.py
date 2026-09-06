@@ -146,6 +146,24 @@ def encode_series(frame: pd.DataFrame, every: int = SERIES_EVERY) -> dict:
     return out
 
 
+# How large a move fills the tint, per change kind and window. Measured on the
+# live store rather than chosen: these are the p90 of the absolute change, so
+# roughly the top decile of real moves saturates and the rest stay legible
+# against each other.
+#
+#   log ratio (multiples, from the daily series)   c1w p90 0.090   c1m p90 0.177
+#   percentage points (snapshot fundamentals)      c1w p90 3.30    c1m no depth
+#
+# The two windows need different spans because a month moves about twice as far
+# as a week; one shared constant would leave weekly moves almost untinted. The
+# points figures are conditional on a move having happened at all -- only 19%
+# of snapshot fundamentals change in a given week, because they are quarterly.
+CHANGE_SATURATION = {
+    ("log", "c1w"): 0.09, ("log", "c1m"): 0.18,
+    ("points", "c1w"): 3.0, ("points", "c1m"): 6.0,
+}
+
+
 def cell_style(score: float | None) -> str:
     """Diverging blue<->red tint. score in [-1,1]; +1 favorable (blue), -1 red."""
     if score is None:
@@ -212,7 +230,8 @@ def band_perf(band: str, proxies: dict) -> str:
 
 def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                    metrics: list, universe: dict, group_labels: dict,
-                   domains: dict, own: dict | None = None) -> str:
+                   domains: dict, own: dict | None = None,
+                   changes: dict | None = None) -> str:
     gcount = {}
     for _k, _l, g, _f, _hb in metrics:
         gcount[g] = gcount.get(g, 0) + 1
@@ -293,6 +312,20 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                 oh = (own or {}).get((tk, key))
                 if oh is not None:
                     attrs += f" data-oh='{oh:.4f}'"
+                # The raw change drives the arrow; the scaled one drives the
+                # tint. Signed so a falling multiple reads favorable on a
+                # lower-is-better metric, matching the peer frame's rule that
+                # blue means good rather than merely up.
+                for window in ("c1w", "c1m"):
+                    delta = (changes or {}).get((tk, key, window))
+                    if delta is None:
+                        continue
+                    sign = -1.0 if _hb is False else 1.0
+                    span = CHANGE_SATURATION[
+                        ("points" if f == "pct" else "log", window)]
+                    scaled = max(-1.0, min(1.0, sign * delta / span))
+                    attrs += (f" data-{window}='{delta:.5f}'"
+                              f" data-{window}s='{scaled:.4f}'")
                 # A missing score is ambiguous on its own: test_domains.py's
                 # 3-name band (-5.0, -3.0, 12.0) excludes the two negatives,
                 # leaving one valid value under relative_scores' floor of
@@ -583,6 +616,9 @@ tr.hidden,tr.filtered{display:none;}
 /* cursor only -- no width/height/padding, so the affordance cannot move a
    column or change row height */
 td.num.g-val[data-oh]{cursor:pointer}
+/* inline-block with no height of its own and a font smaller than the row's
+   line-height, so it cannot grow a cell or wrap a line */
+.arw{font-size:8px;line-height:1;margin-left:3px;color:var(--muted);display:inline-block;vertical-align:middle;}
 #drill{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;
        align-items:center;justify-content:center;z-index:50;}
 #drill[hidden]{display:none;}
@@ -607,8 +643,8 @@ TOOLBAR = """
   <select id="frame">
     <option value="peers">vs peers</option>
     <option value="own">vs own history</option>
-    <option value="c1w" disabled>change 1w (soon)</option>
-    <option value="c1m" disabled>change 1m (soon)</option>
+    <option value="c1w">change 1w</option>
+    <option value="c1m">change 1m</option>
   </select>
   <span class="tsep"></span>
   <span class="tlab">Tint vs</span>
@@ -634,6 +670,8 @@ JS_TMPL = """
 var KEYS=__KEYS__, LABELS=__LABELS__, STAMP=__STAMP__, SERIES=__SERIES__;
 var $=function(s){return document.querySelector(s);};
 var $$=function(s){return Array.prototype.slice.call(document.querySelectorAll(s));};
+// 0.5%: below this a move is rounding, not direction.
+var DEADBAND=0.005;
 var st={tint:'ss',frame:'peers',flat:false,q:'',groups:{val:1,grow:1,prof:1,bal:1}};
 
 // snapshot the band structure once; all later ordering works off this model
@@ -722,7 +760,31 @@ function frameScore(td){
     var p=td.getAttribute('data-oh');
     return p===null?null:String(1-2*parseFloat(p));
   }
-  return td.getAttribute(st.frame==='c1w'?'data-c1w':'data-c1m');
+  // the SCALED attribute, not the raw one: a raw log change of 0.09 is a
+  // large weekly move but would tint at 9% of full if fed straight to tintOf.
+  // data-c1ws / data-c1ms carry the saturation already applied server-side.
+  return td.getAttribute(st.frame==='c1w'?'data-c1ws':'data-c1ms');
+}
+
+// The arrow is always on, in every frame, because direction is the one thing
+// a reader wants without having to change a control. It reads the RAW change,
+// so it says which way the number moved rather than whether that was good --
+// the tint already carries good-or-bad, and doubling it up would lose the
+// distinction between "fell" and "improved by falling".
+function arrows(){
+  $$('td.num').forEach(function(td){
+    var old=td.querySelector('.arw');
+    if(old){old.remove();}
+    var c=td.getAttribute('data-c1w');
+    if(c===null){return;}
+    var v=parseFloat(c);
+    if(!(Math.abs(v)>=DEADBAND)){return;}
+    var s=document.createElement('span');
+    s.className='arw';
+    s.textContent=v>0?'\u25b2':'\u25bc';
+    s.setAttribute('aria-hidden','true');
+    td.appendChild(s);
+  });
 }
 function applyTint(){
   $$('td.num').forEach(function(td){
@@ -897,7 +959,7 @@ function measure(){
 window.addEventListener('resize',measure);
 
 try{var saved=localStorage.getItem('ft-theme');if(saved){setTheme(saved);}}catch(e){}
-measure();applyGroups();applyTint();applyFilter();
+measure();applyGroups();applyTint();arrows();applyFilter();
 })();
 """
 
@@ -915,12 +977,13 @@ def build_js(metrics: list, series: dict | None = None) -> str:
 def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
                  metrics: list, universe: dict, group_labels: dict,
                  domains: dict, own: dict | None = None,
-                 series: dict | None = None) -> str:
+                 series: dict | None = None,
+                 changes: dict | None = None) -> str:
     asof = spx.get("asof", datetime.now(timezone.utc))
     asof_s = asof.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     sectors = "".join(
         render_sector(sec, df[df.sector == sec], proxies, metrics, universe,
-                      group_labels, domains, own=own)
+                      group_labels, domains, own=own, changes=changes)
         for sec in universe
     )
     spx_html = render_spx(spx, df, proxies, universe)
@@ -934,6 +997,16 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
         "semis are scored against semis, infra software against infra software. "
         "<b>6M Trend</b> plots ~6 months of adjusted closes (dashed line = the window's "
         "starting price) and sorts/exports on the 6M % change.</span>"
+        "<span class='na'><b>Frame</b> repaints the same table: "
+        "<b>vs own history</b> asks where a multiple sits in its own five-year "
+        "range, and only appears for the metrics that passed the source proof. "
+        "<b>change 1w/1m</b> tint by how far a number moved; the arrow shows "
+        "the 1-week direction in every frame, with moves under 0.5% left "
+        "unmarked as rounding rather than direction. Valuation multiples carry "
+        "both windows from their own daily series; the remaining metrics come "
+        "from the snapshot table, which has accrued enough for 1 week but not "
+        "yet a month, so those cells stay untinted on <b>change 1m</b> rather "
+        "than reading as no change.</span>"
         "</div>"
     )
     return f"""<!doctype html>
