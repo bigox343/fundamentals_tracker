@@ -55,7 +55,13 @@ def due(tickers, last: dict[str, str], today: str,
 
 
 def sweep_ticker(ticker: str, cik: str, fetch) -> list:
-    """Every concept for one ticker, chain resolved once and held fixed.
+    """Every concept for one ticker, every chain member the sweep fetched.
+
+    Storing every tag rather than one elected winner costs no additional HTTP
+    requests -- the loop below already fetches every tag in the chain, and
+    used to throw away all but pick_tag's choice. The store stays a faithful
+    mirror of what SEC published; the election (xbrl.splice) happens at read
+    time instead, so a future change to that rule needs no re-fetch.
 
     Returns [] rather than raising: one bad ticker must not abort a sweep of
     152 others.
@@ -63,17 +69,16 @@ def sweep_ticker(ticker: str, cik: str, fetch) -> list:
     facts: list = []
     try:
         for name, chain in xbrl.CONCEPTS.items():
-            fetched = {}
+            parsed: list = []
             for tag in chain:
                 try:
-                    fetched[tag] = fetch(cik, tag)
+                    raw = fetch(cik, tag)
                 except Exception:       # noqa: BLE001 - a missing tag is normal
                     continue
                 time.sleep(FETCH_SLEEP)
-            tag = xbrl.pick_tag(ticker, chain, fetched)
-            if tag is None:
-                continue
-            parsed = xbrl.parse_concept(ticker, tag, fetched[tag])
+                if not raw:
+                    continue
+                parsed.extend(xbrl.parse_concept(ticker, tag, raw))
             # An instant fact has no duration, so quarterly() would discard it.
             facts.extend(parsed if name in xbrl.INSTANT_CONCEPTS
                          else xbrl.quarterly(parsed))

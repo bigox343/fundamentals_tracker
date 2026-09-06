@@ -141,30 +141,89 @@ def parse_concept(ticker: str, tag: str, raw: bytes) -> list[Fact]:
     return out
 
 
-def pick_tag(ticker: str, chain: tuple[str, ...],
-             fetched: dict[str, bytes]) -> str | None:
-    """The chain member carrying the most facts, or None.
+# A filer on a 10-K-only cadence can be fourteen months past its last period
+# end and still be current, so anything tighter than this would call a live
+# annual filer dead. ~15 months.
+LIVE_WINDOW_DAYS = 450
 
-    Held fixed for a ticker's whole series. Mixing tags mid-series renders as a
-    revision that never happened: Oracle populates both revenue tags --
-    Revenues carries 141 facts and RevenueFromContractWithCustomerExcluding-
-    AssessedTax carries 104 -- so a fallback taken per-period would jump
-    between two different definitions of the same line depending on which tag
-    happened to have a fact for that quarter.
 
-    On an exact tie the strict `n > best_n` keeps the earlier chain member,
-    which is the right default: CONCEPTS lists each chain with the preferred
-    tag first (e.g. the ASC 606 revenue tag before the legacy SalesRevenueNet).
+def splice(facts: list[Fact], chain: tuple[str, ...]) -> list[Fact]:
+    """One series per ticker, spliced from whichever chain members are live.
+
+    `pick_tag` held one tag fixed for a ticker's whole series, chosen by fact
+    count. For revenue that reliably elects a tag that stopped being filed in
+    2018: eleven years of pre-ASC-606 SalesRevenueNet history outnumbers eight
+    years of the modern tag, so the count rule wins the fact-count race and
+    loses the one that matters -- whether the tag is still being filed. LMT
+    shows the newest tag is not always right either: its ASC 606 tag has only
+    7 facts before the filer reverted to Revenues, so "prefer the newest
+    chain member" would elect a stub. The discriminator has to be measured per
+    ticker, not declared in CONCEPTS: take the live tag with the most facts as
+    primary, then fill periods it does not cover from the next-live tag,
+    strictly before the primary's oldest period so a period is never reported
+    by two tags. That was pick_tag's real justification for holding one tag
+    fixed -- Oracle populates both revenue tags across the same years, and a
+    period reported by two tags at once renders as a revision that never
+    happened. Splicing at a single non-overlapping cut keeps that guarantee
+    while still following the tag that is actually current.
     """
-    best, best_n = None, 0
+    by_tag: dict[str, list[Fact]] = {}
+    for f in facts:
+        by_tag.setdefault(f.concept, []).append(f)
+    if not by_tag:
+        return []
+
+    newest = max(f.period_end for fs in by_tag.values() for f in fs)
+    newest_d = date.fromisoformat(newest)
+
+    def is_live(tag: str) -> bool:
+        tag_newest = max(f.period_end for f in by_tag[tag])
+        gap = (newest_d - date.fromisoformat(tag_newest)).days
+        return gap <= LIVE_WINDOW_DAYS
+
+    # Primary: the live tag with the most facts. Chain order is the tiebreak,
+    # not fact count, so CONCEPTS' preferred-first ordering stays meaningful
+    # on a tie.
+    primary = None
     for tag in chain:
-        raw = fetched.get(tag)
-        if not raw:
+        if tag not in by_tag or not is_live(tag):
             continue
-        n = len(parse_concept(ticker, tag, raw))
-        if n > best_n:
-            best, best_n = tag, n
-    return best
+        if primary is None or len(by_tag[tag]) > len(by_tag[primary]):
+            primary = tag
+    if primary is None:
+        return []
+
+    out = list(by_tag[primary])
+    cut = min(f.period_end for f in out)
+
+    # Remaining tags, newest-first, each contributing only strictly earlier
+    # periods than anything accumulated so far -- never the same period end
+    # twice, and never a phantom revision from an overlapping tag.
+    remaining = [t for t in chain if t != primary and t in by_tag]
+    remaining.sort(key=lambda t: max(f.period_end for f in by_tag[t]),
+                   reverse=True)
+    for tag in remaining:
+        contributed = [f for f in by_tag[tag] if f.period_end < cut]
+        if not contributed:
+            continue
+        out.extend(contributed)
+        cut = min(f.period_end for f in out)
+
+    return sorted(out, key=lambda f: (f.period_end, f.filed))
+
+
+# Filers on 52/53-week fiscal calendars write a quarter's period_start as
+# either the previous period's period_end or the day after it -- both are
+# seen in the wild. Zero tolerance would call the same-day filers' own real
+# quarters non-tiling; this has to be at least 1. Widened to 4 for slack
+# around holiday-adjusted fiscal calendars without opening the window wide
+# enough to accept a genuinely disjoint span as if it tiled.
+TILE_TOLERANCE_DAYS = 4
+
+
+def _close(a: str, b: str) -> bool:
+    return abs((date.fromisoformat(a) - date.fromisoformat(b)).days) \
+        <= TILE_TOLERANCE_DAYS
 
 
 def _first_three_within(annual: Fact, quarters: list[Fact]) -> tuple[float, str] | None:
@@ -189,6 +248,17 @@ def _first_three_within(annual: Fact, quarters: list[Fact]) -> tuple[float, str]
     was known when the annual fact was filed. Anything other than exactly
     three such quarters means reconstruction is not safe, so the year is
     skipped rather than guessed at.
+
+    Containment alone is not enough: it only requires a candidate to fall
+    somewhere inside the annual span, not to actually tile it. AMZN publishes
+    rolling twelve-month facts alongside its real quarters, and three real
+    quarters can fall inside one of those without covering it end-to-end --
+    decomposing that produced a Q4 of -518,000,000 against the filer's own
+    +82,000,000 Q1. So the three candidates must tile the span: the earliest
+    starts within TILE_TOLERANCE_DAYS of annual.period_start, and each next
+    one starts within that same tolerance of the previous one's end. A
+    rolling-year fact whose real quarters do not begin where it begins fails
+    this and is left alone.
     """
     candidates: dict[tuple[str, str], Fact] = {}
     for q in quarters:
@@ -203,8 +273,16 @@ def _first_three_within(annual: Fact, quarters: list[Fact]) -> tuple[float, str]
             candidates[key] = q
     if len(candidates) != 3:
         return None
-    total = sum(f.value for f in candidates.values())
-    return total, max(f.period_end for f in candidates.values())
+
+    ordered = sorted(candidates.values(), key=lambda f: f.period_start)
+    if not _close(ordered[0].period_start, annual.period_start):
+        return None
+    for prev, cur in zip(ordered, ordered[1:]):
+        if not _close(cur.period_start, prev.period_end):
+            return None
+
+    total = sum(f.value for f in ordered)
+    return total, ordered[-1].period_end
 
 
 def quarterly(facts: list[Fact]) -> list[Fact]:
@@ -214,32 +292,74 @@ def quarterly(facts: list[Fact]) -> list[Fact]:
     is a hole and a trailing-twelve-month sum silently spans five quarters.
     The synthesized Q4 is filed on the 10-K's date, because that is when it
     became knowable -- which is the whole point of a point-in-time series.
+
+    Reconstruction runs per concept. Harmless while a caller always handed in
+    a single tag, but splice() now hands in several tags spliced into one
+    stream, and subtracting one tag's quarters from another tag's annual
+    figure would emit a fabricated "Q4" that is really the gap between two
+    different definitions of the same line.
     """
     kept = [f for f in facts
             if classify_span(f.period_start, f.period_end) == "quarter"]
     seen = {(f.period_start, f.period_end, f.filed) for f in kept}
 
+    # Ends a kept quarter already covers, per concept, checked on period_end
+    # alone. The filer's own Q4 starts the day after Q3 ends; the synthesized
+    # one starts on the day Q3 ends -- a one-day gap that defeats any key
+    # built from (period_start, period_end, filed), which is exactly how a
+    # filer's own Q4 and a synthesized duplicate of it used to both survive.
+    #
+    # Built once, from the filer's own quarters, and never added to below. SEC
+    # republishes the same annual figure in every later filing that carries it
+    # as a comparative, and each of those is a separate point in time: the same
+    # Q4 becomes knowable again on each filing date, and _known_at picks the
+    # newest filed version as of any date. Marking the end covered when the
+    # first one is synthesized would keep exactly one Q4 per period, chosen by
+    # whichever filing this dict happened to iterate first -- so the surviving
+    # `filed` date, and with it two years of TTM history, would depend on the
+    # order SEC's JSON arrived in.
+    covered_ends: dict[str, set[str]] = {}
+    for f in kept:
+        covered_ends.setdefault(f.concept, set()).add(f.period_end)
+
+    by_concept: dict[str, list[Fact]] = {}
     for f in facts:
-        if classify_span(f.period_start, f.period_end) != "annual":
-            continue
-        parts = _first_three_within(f, kept)
-        if parts is None:
-            continue
-        total, q3_end = parts
-        key = (q3_end, f.period_end, f.filed)
-        if key in seen:
-            continue
-        # Hard invariant: nothing emitted here may run backwards. Containment
-        # above already forces q3_end < f.period_end, but this is the one
-        # check that would have caught the fy/fp bug immediately instead of
-        # three digits deep in a downstream valuation series -- it belongs in
-        # the code, not only in a test.
-        assert q3_end < f.period_end, (
-            f"synthesized Q4 would span {q3_end}..{f.period_end} for "
-            f"{f.ticker}/{f.concept} filed {f.filed}")
-        seen.add(key)
-        kept.append(Fact(f.ticker, f.concept, q3_end, f.period_end,
-                         f.fy, "Q4", f.form, f.filed, f.value - total))
+        by_concept.setdefault(f.concept, []).append(f)
+
+    for concept, concept_facts in by_concept.items():
+        # Snapshot before the loop below appends to `kept`: a Q4 synthesized
+        # earlier in this same pass must not become a candidate quarter for a
+        # later annual fact of the same concept.
+        concept_quarters = [f for f in kept if f.concept == concept]
+        annuals = [f for f in concept_facts
+                   if classify_span(f.period_start, f.period_end) == "annual"]
+        for f in annuals:
+            if f.period_end in covered_ends.get(concept, set()):
+                continue  # the filer already published this quarter
+            parts = _first_three_within(f, concept_quarters)
+            if parts is None:
+                continue
+            total, q3_end = parts
+            # Re-check what is about to be emitted rather than trusting the
+            # containment above: AMZN DepreciationDepletionAndAmortization
+            # filed 2020-05-01 left a 183-day remainder here, which
+            # classify_span itself would call "ytd", not "quarter".
+            if classify_span(q3_end, f.period_end) != "quarter":
+                continue
+            key = (q3_end, f.period_end, f.filed)
+            if key in seen:
+                continue
+            # Hard invariant: nothing emitted here may run backwards.
+            # Containment above already forces q3_end < f.period_end, but
+            # this is the one check that would have caught the fy/fp bug
+            # immediately instead of three digits deep in a downstream
+            # valuation series -- it belongs in the code, not only in a test.
+            assert q3_end < f.period_end, (
+                f"synthesized Q4 would span {q3_end}..{f.period_end} for "
+                f"{f.ticker}/{f.concept} filed {f.filed}")
+            seen.add(key)
+            kept.append(Fact(f.ticker, concept, q3_end, f.period_end,
+                             f.fy, "Q4", f.form, f.filed, f.value - total))
     return kept
 
 

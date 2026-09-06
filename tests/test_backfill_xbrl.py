@@ -24,7 +24,11 @@ def test_a_ticker_whose_last_filing_has_gone_stale_is_due():
     assert backfill.due(["AAPL"], {"AAPL": "2026-04-30"}, "2026-09-05") == ["AAPL"]
 
 
-def test_sweep_ticker_holds_one_tag_per_concept(monkeypatch):
+def test_sweep_ticker_stores_every_chain_member_it_fetched(monkeypatch):
+    # The election (xbrl.splice) now happens at read time, not at sweep time.
+    # Storing every tag the sweep already fetched -- rather than throwing away
+    # all but one -- costs no additional HTTP requests and lets a future
+    # change to the election rule apply without a re-fetch.
     calls = []
 
     def fake_fetch(cik, tag):
@@ -38,8 +42,10 @@ def test_sweep_ticker_holds_one_tag_per_concept(monkeypatch):
     facts = backfill.sweep_ticker("AAPL", "0000320193", fake_fetch)
     tags = {f.concept for f in facts}
     assert "RevenueFromContractWithCustomerExcludingAssessedTax" in tags
-    assert "Revenues" not in tags, "the chain must resolve to one tag, not mix"
     assert all(f.ticker == "AAPL" for f in facts)
+    # Every tag in the revenue chain was fetched, even though only one of
+    # them carried any facts in this fixture.
+    assert set(backfill.xbrl.CONCEPTS["revenue"]) <= set(calls)
 
 
 def test_a_ticker_that_fails_does_not_abort_the_sweep(monkeypatch):

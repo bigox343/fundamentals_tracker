@@ -92,7 +92,45 @@ def test_an_instant_fact_with_no_period_start_is_not_treated_as_reversed():
     instant = Fact("T", "CashAndCashEquivalentsAtCarryingValue", "",
                     "2026-06-30", 2026, "Q2", "10-Q", "2026-07-31", 500.0)
     known = valuation._known_at([instant], "2026-08-01")
-    assert known[("", "2026-06-30")].value == 500.0
+    assert known["2026-06-30"].value == 500.0
+
+
+def test_two_spellings_of_one_quarters_start_are_the_same_period():
+    # Filers rewrite a quarter's start between filings: ADBE reported the
+    # quarter ending 2009-05-29 as starting 2009-02-27 in its 10-Q and
+    # 2009-02-28 when it republished, same value both times. Measured across
+    # the store, 255 groups do this, spread at most 9 days. Treating the two
+    # spellings as two periods lets one quarter occupy two of the four TTM
+    # slots and pushes a real quarter out.
+    original = _q("2026-06-30", "2026-07-31", 130.0, "2026-04-01", 2026, "Q2")
+    respelled = _q("2026-06-30", "2027-02-10", 130.0, "2026-03-31", 2026, "Q2")
+    facts = _four_quarters() + [respelled]
+    known = valuation._known_at(facts, "2027-03-01")
+    assert len(known) == 4, "one quarter, not two"
+    assert valuation.ttm_at(facts, "2027-03-01") == pytest.approx(460.0)
+    assert original.period_start != respelled.period_start
+
+
+def test_a_restatement_supersedes_the_original_it_respells():
+    # 24 of those 255 groups changed the value too -- MSFT restated its
+    # 2016-09-30 net income by 17% while also moving the start by a day. The
+    # restated figure must win once filed, and must not be summed alongside
+    # the original.
+    restated = _q("2026-06-30", "2027-02-10", 900.0, "2026-03-31", 2026, "Q2")
+    facts = _four_quarters() + [restated]
+    assert valuation.ttm_at(facts, "2026-12-01") == pytest.approx(460.0), \
+        "before the restatement is filed, the market had the original"
+    assert valuation.ttm_at(facts, "2027-03-01") == pytest.approx(1230.0), \
+        "after, the restated quarter replaces it rather than adding to it"
+
+
+def test_a_start_further_apart_than_the_tolerance_is_still_rejected():
+    # The real hazard sits at 93 days (a YTD fact against the quarter it
+    # contains) and nothing legitimate was measured between 10 and 100, so
+    # the tolerance must not have swallowed the check it exists for.
+    far = _q("2026-06-30", "2026-07-31", 250.0, "2026-05-01", 2026, "Q2")
+    with pytest.raises(ValueError, match="different period shapes"):
+        valuation.ttm_at(_four_quarters() + [far], "2026-08-01")
 
 
 def test_a_period_end_shared_by_two_different_period_starts_is_rejected():

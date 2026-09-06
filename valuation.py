@@ -20,6 +20,8 @@ not.
 """
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 import history
@@ -30,6 +32,27 @@ TTM_QUARTERS = 4
 # consecutive filings. 1.5 is comfortably above any plausible issuance and
 # below the smallest split anyone runs (2:1).
 SPLIT_MIN_RATIO = 1.5
+
+
+# How far two filings may disagree about where one quarter started before the
+# two are treated as different period shapes rather than two spellings of the
+# same period. Measured across the whole store: the largest real disagreement
+# is 9 days (52/53-week filers such as ADBE, ADI and COST, whose fiscal
+# calendar shifts a boundary by up to a week between filings), and there is
+# nothing between 10 and 100 days. The shape this must still catch -- a
+# year-to-date fact sharing a period_end with the quarter it contains -- sits
+# at 93 days. 15 leaves both margins wide.
+START_TOLERANCE_DAYS = 15
+
+
+def _shape_conflict(lo: str, hi: str) -> bool:
+    """Whether two spans ending on one date are different period shapes."""
+    if bool(lo) != bool(hi):
+        return True     # an instant and a duration are never the same period
+    if not lo:
+        return False
+    return abs((date.fromisoformat(hi) - date.fromisoformat(lo)).days) \
+        > START_TOLERANCE_DAYS
 
 
 def _known_at(facts, on: str) -> dict:
@@ -54,13 +77,26 @@ def _known_at(facts, on: str) -> dict:
       legitimately carry an empty period_start -- they are levels on a date,
       not spans -- and are exempt from this check since there is no
       "backwards" for a level to be.
-    - No two surviving facts may share a period_end with different
-      period_start values (see the module docstring's caller contract). This
-      is cheap -- one pass over the already-deduped dict -- and catches a
-      caller that handed in unnormalized facts before that mistake reaches
-      ttm_at's sum.
+    - No two surviving facts may describe the same period_end with spans that
+      are genuinely different shapes (see the module docstring's caller
+      contract). A year-to-date fact sharing a period_end with the quarter it
+      contains would otherwise be summed alongside it.
+
+    The period is keyed on period_end alone, not on (period_start,
+    period_end). Filers rewrite a quarter's start date between filings --
+    measured across the whole store, 255 (ticker, concept, period_end) groups
+    carry more than one spelling of the start, with a maximum spread of 9
+    days and nothing at all between 10 and 100. Keying on the pair treats the
+    two spellings as two periods, and 24 of those 255 are real restatements
+    where the value changed as well: MSFT's 2016-09-30 net income by 17%,
+    MSI's 2010-12-31 revenue by 61%, NTAP's 2022-01-28 revenue by 51%. Summing
+    both spellings would count one restated quarter twice, at two different
+    values. Keyed on period_end, newest filed wins, which is what a
+    point-in-time series wants: the original before the restatement was
+    published, the restated figure after.
     """
     best: dict = {}
+    spans: dict[str, tuple[str, str]] = {}   # period_end -> (min, max) start
     for f in facts:
         if f.filed > on:
             continue
@@ -72,20 +108,20 @@ def _known_at(facts, on: str) -> dict:
         # nothing to guard against here too.
         if f.period_start and f.period_start >= f.period_end:
             continue
-        key = (f.period_start, f.period_end)
-        if key not in best or f.filed > best[key].filed:
-            best[key] = f
 
-    starts_by_end: dict[str, set] = {}
-    for f in best.values():
-        starts_by_end.setdefault(f.period_end, set()).add(f.period_start)
-    bad = {end: starts for end, starts in starts_by_end.items()
-           if len(starts) > 1}
-    if bad:
-        raise ValueError(
-            "period_end shared by facts with different period_start values "
-            f"-- pass one fact stream per period shape (xbrl.quarterly()): "
-            f"{bad}")
+        lo, hi = spans.get(f.period_end, (f.period_start, f.period_start))
+        lo, hi = min(lo, f.period_start), max(hi, f.period_start)
+        if _shape_conflict(lo, hi):
+            raise ValueError(
+                f"period_end {f.period_end} carries spans starting {lo!r} and "
+                f"{hi!r} -- more than {START_TOLERANCE_DAYS} days apart, so "
+                "these are different period shapes. Pass one stream per shape "
+                "(xbrl.quarterly() output).")
+        spans[f.period_end] = (lo, hi)
+
+        cur = best.get(f.period_end)
+        if cur is None or f.filed > cur.filed:
+            best[f.period_end] = f
 
     return best
 

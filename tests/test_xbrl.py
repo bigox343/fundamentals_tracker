@@ -57,30 +57,6 @@ def test_an_amendment_does_not_replace_the_original():
         "at least one period should carry an original and a later filing"
 
 
-def test_pick_tag_chooses_the_chain_member_with_the_most_facts():
-    fetched = {
-        "RevenueFromContractWithCustomerExcludingAssessedTax":
-            _raw("xbrl_aapl_revenues"),
-        "Revenues": b'{"units":{"USD":[]}}',
-    }
-    tag = xbrl.pick_tag("AAPL", xbrl.CONCEPTS["revenue"], fetched)
-    assert tag == "RevenueFromContractWithCustomerExcludingAssessedTax"
-
-
-def test_pick_tag_falls_through_to_the_second_member():
-    fetched = {
-        "RevenueFromContractWithCustomerExcludingAssessedTax":
-            b'{"units":{"USD":[]}}',
-        "Revenues": _raw("xbrl_ora_revenues"),
-    }
-    assert xbrl.pick_tag("ORCL", xbrl.CONCEPTS["revenue"], fetched) == "Revenues"
-
-
-def test_pick_tag_returns_none_when_nothing_in_the_chain_has_facts():
-    fetched = {t: b'{"units":{"USD":[]}}' for t in xbrl.CONCEPTS["revenue"]}
-    assert xbrl.pick_tag("ZZZZ", xbrl.CONCEPTS["revenue"], fetched) is None
-
-
 def test_q4_is_reconstructed_from_the_annual_minus_the_first_three():
     # A 10-K carries no Q4 fact. Without reconstruction every Q4 is a hole.
     facts = [
@@ -161,22 +137,6 @@ def test_a_duplicate_annual_frame_does_not_produce_two_q4_facts():
     assert len(q4) == 1
 
 
-def test_pick_tag_prefers_the_larger_real_orcl_tag_over_chain_order():
-    # Both Oracle revenue tags carry real, non-empty data: Revenues has 141
-    # facts, RevenueFromContractWithCustomerExcludingAssessedTax has 104. A
-    # chain-order rule ("first member with any facts") would pick the latter,
-    # since it is listed first in CONCEPTS["revenue"] -- the count rule must
-    # pick Revenues instead. Unlike the falls-through test, neither candidate
-    # here is empty, so this is the only test the count rule cannot pass by
-    # accident.
-    fetched = {
-        "RevenueFromContractWithCustomerExcludingAssessedTax":
-            _raw("xbrl_ora_rev_contract"),
-        "Revenues": _raw("xbrl_ora_revenues"),
-    }
-    assert xbrl.pick_tag("ORCL", xbrl.CONCEPTS["revenue"], fetched) == "Revenues"
-
-
 def test_a_null_end_writes_no_fact():
     raw = (b'{"units":{"USD":[{"start":"2025-01-01","end":null,'
            b'"val":100.0,"fy":2025,"fp":"Q1","form":"10-Q","filed":"2025-04-30"}]}}')
@@ -226,3 +186,251 @@ def test_fetch_concept_still_retries_a_non_404_failure(monkeypatch):
         xbrl.fetch_concept("0000320193", "SomeTag")
     assert len(calls) == 3, "a non-404 failure must still be retried 3 times"
     assert sleeps == [1.5, 3.0, 4.5]
+
+
+# --------------------------------------------------------------------------- #
+# splice                                                                       #
+# --------------------------------------------------------------------------- #
+def _rev(tag, end, start, filed, value=1.0):
+    return xbrl.Fact("T", tag, start, end, None, None, "10-Q", filed, value)
+
+
+def _span(tag, first_year, last_year):
+    """One fact per year-end from first_year to last_year inclusive."""
+    return [_rev(tag, f"{y}-12-31", f"{y}-01-01", f"{y + 1}-02-15")
+            for y in range(first_year, last_year + 1)]
+
+
+def test_splice_prefers_the_live_tag_over_the_one_with_more_facts():
+    # MMM's shape: legacy has eleven years, modern has eight and is current.
+    facts = (_span("SalesRevenueNet", 2007, 2017)
+             + _span("Revenues", 2018, 2026))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    assert max(f.period_end for f in out) == "2026-12-31", \
+        "electing the tag with the most facts strands the series in 2017"
+
+
+def test_splice_keeps_the_legacy_history_behind_the_live_tag():
+    facts = (_span("SalesRevenueNet", 2007, 2017)
+             + _span("Revenues", 2018, 2026))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    assert min(f.period_end for f in out) == "2007-12-31"
+    assert len(out) == 20, "every year from 2007 to 2026, none twice"
+
+
+def test_splice_never_reports_a_period_from_two_tags():
+    # Oracle's shape: both tags populated over the same years. The overlap must
+    # come from the primary alone -- a period reported twice renders as a
+    # revision that never happened.
+    facts = (_span("Revenues", 2016, 2026)
+             + _span("RevenueFromContractWithCustomerExcludingAssessedTax",
+                     2016, 2026))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    ends = [f.period_end for f in out]
+    assert len(ends) == len(set(ends))
+    assert len({f.concept for f in out}) == 1
+
+
+def test_splice_picks_the_live_tag_that_is_not_the_newest_chain_member():
+    # LMT's shape: the ASC 606 tag exists but is a stub; Revenues is live.
+    facts = (_span("SalesRevenueNet", 2007, 2017)
+             + _span("RevenueFromContractWithCustomerExcludingAssessedTax",
+                     2017, 2019)
+             + _span("Revenues", 2016, 2026))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    assert {f.concept for f in out if f.period_end >= "2020-12-31"} \
+        == {"Revenues"}
+    assert max(f.period_end for f in out) == "2026-12-31"
+
+
+def test_splice_of_a_single_tag_chain_is_that_tag():
+    facts = _span("NetIncomeLoss", 2020, 2026)
+    assert xbrl.splice(facts, xbrl.CONCEPTS["netIncome"]) == \
+        sorted(facts, key=lambda f: (f.period_end, f.filed))
+
+
+def test_splice_of_nothing_is_nothing():
+    assert xbrl.splice([], xbrl.CONCEPTS["revenue"]) == []
+
+
+def test_a_ticker_that_stopped_filing_still_resolves_a_primary():
+    # Acquired in 2019. Liveness is relative to the chain's own newest fact,
+    # so this must not come back empty.
+    facts = (_span("SalesRevenueNet", 2007, 2016)
+             + _span("Revenues", 2017, 2019))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    assert max(f.period_end for f in out) == "2019-12-31"
+    assert min(f.period_end for f in out) == "2007-12-31"
+
+
+def test_splice_breaks_a_tie_toward_the_preferred_chain_member():
+    facts = (_span("Revenues", 2020, 2026)
+             + _span("RevenueFromContractWithCustomerExcludingAssessedTax",
+                     2020, 2026))
+    out = xbrl.splice(facts, xbrl.CONCEPTS["revenue"])
+    assert {f.concept for f in out} == \
+        {"RevenueFromContractWithCustomerExcludingAssessedTax"}, \
+        "CONCEPTS lists the preferred tag first; a tie must respect that"
+
+
+# --------------------------------------------------------------------------- #
+# quarterly(): Q4 reconstruction defects                                      #
+# --------------------------------------------------------------------------- #
+def test_no_q4_is_synthesized_when_the_filer_published_that_quarter():
+    """Defect C: AAPL's own Q4 starts one day after Q3 ends; the synthesized
+    one starts on the day Q3 ends, so a key of (start, end, filed) misses."""
+    filed = "2011-10-26"
+    facts = [
+        _rev("NetIncomeLoss", "2010-12-25", "2010-09-26", filed, 6.0e9),
+        _rev("NetIncomeLoss", "2011-03-26", "2010-12-26", filed, 5.0e9),
+        _rev("NetIncomeLoss", "2011-06-25", "2011-03-27", filed, 7.3e9),
+        _rev("NetIncomeLoss", "2011-09-24", "2011-06-26", filed, 6.623e9),
+        _rev("NetIncomeLoss", "2011-09-24", "2010-09-26", filed, 25.923e9),
+    ]
+    out = xbrl.quarterly(facts)
+    q4 = [f for f in out if f.period_end == "2011-09-24"]
+    assert len(q4) == 1, "the filer's own Q4 is already here; do not add one"
+    assert q4[0].period_start == "2011-06-26", "keep the filer's, not ours"
+
+
+def test_a_rolling_twelve_month_fact_is_not_decomposed():
+    """Defect A: AMZN publishes TTM facts ending at quarter ends. Decomposing
+    one emitted a Q4 of -518,000,000 where the truth was +82,000,000."""
+    filed = "2013-04-26"
+    facts = [
+        _rev("NetIncomeLoss", "2012-06-30", "2012-04-01", filed, 7.0e6),
+        _rev("NetIncomeLoss", "2012-09-30", "2012-07-01", filed, -274.0e6),
+        _rev("NetIncomeLoss", "2012-12-31", "2012-10-01", filed, 97.0e6),
+        _rev("NetIncomeLoss", "2013-03-31", "2013-01-01", filed, 82.0e6),
+        # the rolling year, ending at a Q1 end rather than a fiscal year end
+        _rev("NetIncomeLoss", "2013-03-31", "2012-04-01", filed, -88.0e6),
+    ]
+    out = xbrl.quarterly(facts)
+    ends = [f.period_end for f in out]
+    assert ends.count("2013-03-31") == 1, \
+        "only the filer's real Q1 -- no Q4 synthesized from a rolling year"
+
+
+def test_a_synthesized_quarter_that_is_not_a_quarter_is_dropped():
+    """Defect B: three 80-day candidates tile an 380-day annual span from its
+    own start and chain contiguously, so the tiling rule alone accepts them --
+    but the 140-day remainder they leave is not a quarter, which is what
+    AMZN DepreciationDepletionAndAmortization filed 2020-05-01 did with a
+    183-day remainder shipped as a quarter worth 6,561,000,000 beside the
+    filer's real 5,362,000,000.
+
+    NOTE: this fixture replaces the brief's literal Step 4b text, which built
+    an annual fact spanning 2019-01-01..2020-03-31 (455 days). That span is
+    classified "other", not "annual", by classify_span's own bands, so
+    quarterly() never attempted to decompose it and the test passed before
+    any of the three rules existed. See task-10.5-report.md for the guard-
+    mutation finding this uncovered.
+    """
+    filed = "2020-05-01"
+    facts = [
+        _rev("Dep", "2019-03-22", "2019-01-01", filed, 1.0e9),
+        _rev("Dep", "2019-06-10", "2019-03-22", filed, 1.1e9),
+        _rev("Dep", "2019-08-29", "2019-06-10", filed, 1.2e9),
+        _rev("Dep", "2020-01-16", "2019-01-01", filed, 9.9e9),
+    ]
+    out = xbrl.quarterly(facts)
+    for f in out:
+        assert xbrl.classify_span(f.period_start, f.period_end) == "quarter", \
+            f"emitted a {f.period_start}..{f.period_end} span as a quarter"
+
+
+def test_three_quarters_that_start_well_after_the_annual_span_do_not_tile_it():
+    """Rule 2 in isolation. Three 90-day quarters and a 95-day remainder are
+    each individually quarter-shaped, so rule 3's reclassification would let
+    this through, and no other kept quarter already ends where the annual
+    fact ends, so rule 1 would too. Only the tiling requirement -- the first
+    candidate must start within days of the annual span's own start -- catches
+    that these three quarters begin ten days after the annual fact starts,
+    leaving an unaccounted-for slice at the front that the reconstruction
+    would otherwise silently drop.
+    """
+    filed = "2019-11-01"
+    facts = [
+        _rev("NetIncomeLoss", "2019-01-09", "2018-10-11", filed, 10.0e6),
+        _rev("NetIncomeLoss", "2019-04-09", "2019-01-09", filed, 11.0e6),
+        _rev("NetIncomeLoss", "2019-07-08", "2019-04-09", filed, 12.0e6),
+        _rev("NetIncomeLoss", "2019-10-11", "2018-10-01", filed, 50.0e6),
+    ]
+    out = xbrl.quarterly(facts)
+    assert [f for f in out if f.period_end == "2019-10-11"] == [], \
+        "the three candidates start 10 days after the annual span begins"
+
+
+def test_a_reconstructed_q4_equals_the_one_the_filer_published():
+    """The property the 74.5% exact-agreement measurement establishes. When
+    the filer's own Q4 is withheld, reconstruction must recover it exactly."""
+    filed = "2011-10-26"
+    quarters = [
+        _rev("NetIncomeLoss", "2010-12-25", "2010-09-26", filed, 6.0e9),
+        _rev("NetIncomeLoss", "2011-03-26", "2010-12-26", filed, 5.0e9),
+        _rev("NetIncomeLoss", "2011-06-25", "2011-03-27", filed, 7.3e9),
+    ]
+    annual = _rev("NetIncomeLoss", "2011-09-24", "2010-09-26", filed, 24.923e9)
+    out = xbrl.quarterly(quarters + [annual])
+    q4 = [f for f in out if f.period_end == "2011-09-24"]
+    assert len(q4) == 1
+    assert q4[0].value == pytest.approx(6.623e9)
+
+
+def _republished_annual():
+    """Three real quarters plus one annual figure carried by three filings.
+
+    SEC serves it exactly this way: the 10-K states the year, and every later
+    filing that shows it as a prior-year comparative repeats it under its own
+    filing date.
+    """
+    quarters = [
+        _rev("NetIncomeLoss", "2010-12-25", "2010-09-26", "2011-10-26", 6.0e9),
+        _rev("NetIncomeLoss", "2011-03-26", "2010-12-26", "2011-10-26", 5.0e9),
+        _rev("NetIncomeLoss", "2011-06-25", "2011-03-27", "2011-10-26", 7.3e9),
+    ]
+    annuals = [_rev("NetIncomeLoss", "2011-09-24", "2010-09-26", d, 24.923e9)
+               for d in ("2011-10-26", "2012-10-31", "2013-10-30")]
+    return quarters + annuals
+
+
+def test_a_republished_annual_yields_a_q4_for_each_filing_date():
+    # Each filing is its own point in time: the same Q4 becomes knowable again
+    # on each date, and _known_at picks the newest filed version as of any
+    # date. Keeping only one would erase the earlier filings -- a TTM asked
+    # for 2012 would find no Q4 at all, though the number was published in
+    # October 2011.
+    q4 = [f for f in xbrl.quarterly(_republished_annual())
+          if f.period_end == "2011-09-24"]
+    assert sorted(f.filed for f in q4) == \
+        ["2011-10-26", "2012-10-31", "2013-10-30"]
+    assert all(f.value == pytest.approx(6.623e9) for f in q4)
+
+
+def test_which_filings_survive_does_not_depend_on_input_order():
+    # The order SEC's JSON happens to arrive in must not decide which filing
+    # dates reach the store -- filed is part of the primary key and drives
+    # every point-in-time answer downstream.
+    facts = _republished_annual()
+    forward = xbrl.quarterly(facts)
+    backward = xbrl.quarterly(list(reversed(facts)))
+    key = lambda fs: sorted(  # noqa: E731
+        (f.concept, f.period_start, f.period_end, f.filed, f.value) for f in fs)
+    assert key(forward) == key(backward)
+
+
+def test_quarterly_groups_by_concept_before_reconstructing_a_q4():
+    # Once splice hands quarterly() a multi-tag stream, an annual fact under
+    # one tag must never be reduced by quarters filed under a different tag --
+    # that would subtract, say, three SalesRevenueNet quarters from a Revenues
+    # year and emit the difference as a fabricated "Q4".
+    filed = "2026-02-15"
+    facts = [
+        _rev("TagB", "2025-03-31", "2025-01-01", filed, 100.0),
+        _rev("TagB", "2025-06-30", "2025-04-01", filed, 110.0),
+        _rev("TagB", "2025-09-30", "2025-07-01", filed, 120.0),
+        _rev("TagA", "2025-12-31", "2025-01-01", filed, 500.0),
+    ]
+    out = xbrl.quarterly(facts)
+    assert [f for f in out if f.period_end == "2025-12-31"] == [], \
+        "TagA's annual fact has no same-tag quarters to reconstruct a Q4 from"

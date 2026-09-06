@@ -2044,6 +2044,48 @@ for exactly this problem in the 13F path."
 
 ---
 
+## Task 10.5: Correct the chain election and the Q4 reconstruction, then rebuild
+
+Inserted after Task 10 landed, by two findings measured against the live store.
+Task 11's proof gate cannot pass without it. The full brief, with the tests and
+the two hard gates, is at
+`.superpowers/sdd/2026-09-05-valuation-history/task-10.5-brief.md`; the
+measurements are in that directory's `progress.md`.
+
+**Part 1 -- `xbrl.splice` replaces `pick_tag`.** `pick_tag` elected "the chain
+member carrying the most facts, held fixed for a ticker's whole series". For
+revenue that reliably elects a tag that stopped being filed: eleven years of
+pre-2018 `SalesRevenueNet` outnumber eight years of post-ASC-606 filings. In
+the store, 143 tickers have revenue facts and only 70 have any dated
+2025-06-01 or later; 57 of the stale ones stop in 2018. `ttm_series`
+forward-fills, so P/S for a third of the universe would have been an
+eight-year-old revenue figure. `splice` takes the live tag as primary and
+fills strictly earlier periods from the next-best, so no period is ever
+reported by two tags -- which was `pick_tag`'s real reason for holding one
+fixed. The backfill already fetches every chain member and discards the losers,
+so storing them costs no additional requests.
+
+**Part 2 -- three defects in `quarterly()`**, all surfaced by the guard Task 10
+added to `valuation._known_at`, which fired on 439 of 1,428 (ticker, concept)
+pairs in the live store. It synthesizes a Q4 even when the filer published one
+(the dedup key uses a `period_start` that differs by a single day); it
+decomposes any annual-length span rather than only a fiscal year, so Amazon's
+rolling twelve-month facts produced a Q4 of -518,000,000 against the filer's
+own +82,000,000; and it never re-checks the span it emits, so a 183-day
+remainder shipped as a quarter.
+
+Where a filer published its own Q4, the reconstruction already matched it to
+the cent in 4,615 of 6,193 cases -- so the method is sound and stays. Only the
+guards around it change.
+
+Both halves change what belongs in `reported`, so the table is cleared and
+rebuilt once at the end rather than twice.
+
+**Gates:** `valuation.ttm_at` must raise zero times across the store, down from
+439. `revenue` must reach at least 130 tickers with a recent fact, up from 70.
+
+---
+
 ## Task 11: Daily multiple series, own-range percentiles, and the proof report
 
 **Files:**
