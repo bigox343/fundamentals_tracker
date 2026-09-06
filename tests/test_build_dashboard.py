@@ -79,7 +79,16 @@ def _long_enough(values):
     # own_percentile needs a full trading year (MIN_HISTORY=250) before it
     # returns anything -- a shorter series is exactly what the second test
     # below is checking gets skipped.
-    return pd.Series(values, dtype=float)
+    #
+    # A real DatetimeIndex matters as of Task 13, not just length: own_history
+    # now also calls render.encode_series on this same frame, which reads
+    # s.index[0].strftime(...) -- a bare RangeIndex fixture would hide that
+    # requirement forever, since build_dashboard.py's real build_all() frames
+    # always carry a DatetimeIndex (dates from the price series) and a
+    # RangeIndex never occurs outside tests.
+    values = list(values)
+    idx = pd.date_range("2015-01-01", periods=len(values), freq="B")
+    return pd.Series(values, index=idx, dtype=float)
 
 
 def test_own_history_keeps_only_pairs_that_passed_the_proof(monkeypatch):
@@ -93,7 +102,7 @@ def test_own_history_keeps_only_pairs_that_passed_the_proof(monkeypatch):
         {"ticker": "MSFT", "metric": "trailingPE", "median_error": 0.5, "passed": False},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL", "MSFT"]})
-    out = bd.own_history(object(), df)
+    out, _ = bd.own_history(object(), df)
     assert ("AAPL", "trailingPE") in out
     assert ("MSFT", "trailingPE") not in out, "a pair that failed the proof must not render"
 
@@ -105,8 +114,40 @@ def test_own_history_skips_a_pair_that_passed_but_lacks_enough_history(monkeypat
         {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL"]})
-    out = bd.own_history(object(), df)
+    out, payload = bd.own_history(object(), df)
     assert out == {}, "MIN_HISTORY is not to be re-floored, but it must still be honored"
+    assert payload == {}, "a pair with no percentile must not be embedded as a series either"
+
+
+def test_own_history_series_payload_matches_the_percentile_set_exactly(monkeypatch):
+    # Task 13's amendment 2: the embedded SERIES payload must be filtered to
+    # precisely the pairs that carry a data-oh percentile, on pain of shipping
+    # unproven or too-short series into the page for a cell nobody can click.
+    # trailingPE passes the proof and clears MIN_HISTORY; ps passes the proof
+    # but is too short (10 rows), so it must appear in neither out nor payload.
+    idx = pd.date_range("2021-01-01", periods=300, freq="B")
+    # "ps" needs idx passed explicitly, not just a matching length: building
+    # the DataFrame with index=idx while ps carries its own default
+    # RangeIndex makes pandas realign ps by label against the date index,
+    # silently turning it all-NaN (no integer label matches a date) --
+    # dropna().empty would then be True for the *wrong* reason, passing this
+    # test even with the ok-filter deleted from own_history.
+    series = {"AAPL": pd.DataFrame({
+        "trailingPE": _long_enough(range(300)).values,
+        "ps": pd.Series(list(range(10)) + [float("nan")] * 290, index=idx),
+    }, index=idx)}
+    monkeypatch.setattr(valuation, "build_all", lambda conn, tickers: series)
+    monkeypatch.setattr(prove_xbrl, "report", lambda conn, built=None: pd.DataFrame([
+        {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
+        {"ticker": "AAPL", "metric": "ps", "median_error": 0.0, "passed": True},
+    ]))
+    df = pd.DataFrame({"ticker": ["AAPL"]})
+    out, payload = bd.own_history(object(), df)
+    assert set(out) == {("AAPL", "trailingPE")}
+    assert set(payload["AAPL"]) == {"trailingPE"}, (
+        "ps passed the proof but has no percentile, so it must not be embedded"
+    )
+    assert set(payload["AAPL"]["trailingPE"]) == {"t0", "step", "v"}
 
 
 def test_own_history_hands_its_series_to_report_instead_of_letting_it_rebuild(monkeypatch):
@@ -132,6 +173,7 @@ def test_own_history_is_non_fatal_when_something_raises(monkeypatch, capsys):
         raise RuntimeError("SEC is down")
 
     monkeypatch.setattr(valuation, "build_all", _boom)
-    out = bd.own_history(object(), pd.DataFrame({"ticker": ["AAPL"]}))
+    out, payload = bd.own_history(object(), pd.DataFrame({"ticker": ["AAPL"]}))
     assert out == {}
+    assert payload == {}
     assert "own-history frame unavailable" in capsys.readouterr().err

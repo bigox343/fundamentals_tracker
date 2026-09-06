@@ -103,6 +103,49 @@ def spark_cell(row) -> str:
     return f"<span class='spk-wrap'>{svg}<span class='spk-val'>{val}</span></span>"
 
 
+# Weekly is plenty for a five-year range chart and costs a fifth of the
+# bytes. Percentiles are computed from the *daily* series server-side (see
+# valuation.own_percentile) and travel to the page as data-oh -- downsampling
+# here only ever affects the picture, never a number the reader is shown.
+# The click handler must read data-oh rather than re-deriving a percentile
+# from these weekly points; see the JS_TMPL comment beside drawDrill.
+SERIES_EVERY = 5
+
+
+def _round4sig(v: float) -> float:
+    """Round to four *significant figures*, not four decimal places.
+
+    round(1.23456789, 4) is 1.2346 -- four decimal places, a different
+    quantity once a multiple's value clears 1. A P/S of 1.23456789 should
+    read as 1.235. Guards against the naive round(v, 4) that satisfies this
+    module's docstring but not its own test.
+    """
+    if v == 0:
+        return 0.0
+    return round(v, 3 - int(math.floor(math.log10(abs(v)))))
+
+
+def encode_series(frame: pd.DataFrame, every: int = SERIES_EVERY) -> dict:
+    """One ticker's multiple history, compactly, for the drilldown chart.
+
+    Only shapes the payload -- which (ticker, metric) pairs are worth
+    encoding at all is build_dashboard.own_history's call, since that is
+    where the proof-pass and MIN_HISTORY gates already live. A column with
+    no data survives dropna().empty rather than embedding an empty chart.
+    """
+    out = {}
+    for column in frame.columns:
+        s = frame[column].iloc[::every]
+        if s.dropna().empty:
+            continue
+        out[column] = {
+            "t0": s.index[0].strftime("%Y-%m-%d"),
+            "step": every,
+            "v": [None if pd.isna(v) else _round4sig(float(v)) for v in s],
+        }
+    return out
+
+
 def cell_style(score: float | None) -> str:
     """Diverging blue<->red tint. score in [-1,1]; +1 favorable (blue), -1 red."""
     if score is None:
@@ -535,6 +578,19 @@ tr.hidden,tr.filtered{display:none;}
 .hidecol{display:none;}
 .nores{padding:14px 4px;color:var(--muted);font-size:13px;}
 @media print{.toolbar{display:none;}}
+
+/* ---- drilldown ---- */
+/* cursor only -- no width/height/padding, so the affordance cannot move a
+   column or change row height */
+td.num.g-val[data-oh]{cursor:pointer}
+#drill{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;
+       align-items:center;justify-content:center;z-index:50;}
+#drill[hidden]{display:none;}
+.drill-card{background:var(--page);border:1px solid var(--line);border-radius:8px;
+            padding:18px;max-width:min(720px,92vw);}
+.drill-x{float:right;background:none;border:0;color:var(--muted);cursor:pointer;
+         font-size:16px;}
+#drill-chart{color:var(--val);}
 """
 
 
@@ -575,7 +631,7 @@ TOOLBAR = """
 JS_TMPL = """
 (function(){
 'use strict';
-var KEYS=__KEYS__, LABELS=__LABELS__, STAMP=__STAMP__;
+var KEYS=__KEYS__, LABELS=__LABELS__, STAMP=__STAMP__, SERIES=__SERIES__;
 var $=function(s){return document.querySelector(s);};
 var $$=function(s){return Array.prototype.slice.call(document.querySelectorAll(s));};
 var st={tint:'ss',frame:'peers',flat:false,q:'',groups:{val:1,grow:1,prof:1,bal:1}};
@@ -675,6 +731,42 @@ function applyTint(){
   });
 }
 
+// KEYS is the metric order build_js() embeds. The first cell of a row is the
+// sticky name column, so a cell's metric is its position less one.
+function colOf(td){
+  return Array.prototype.indexOf.call(td.parentNode.children, td) - 1;
+}
+// pct is the percentile already painted on the cell (data-oh), computed
+// server-side from the full daily series -- NOT re-derived here from
+// SERIES, which is downsampled to weekly for the picture only. Recomputing
+// it from these weekly points is exactly the bug this function must not
+// have: it would let the cell's tint and this panel's own number come from
+// two different series and disagree on screen at the same moment.
+function drawDrill(tk,key,pct){
+  var s=(SERIES[tk]||{})[key];
+  if(!s){return;}
+  var pts=s.v, n=pts.length, lo=Infinity, hi=-Infinity;
+  pts.forEach(function(v){if(v!==null){lo=Math.min(lo,v);hi=Math.max(hi,v);}});
+  if(!(hi>lo)){return;}
+  var d='', seen=false;
+  pts.forEach(function(v,i){
+    if(v===null){seen=false;return;}
+    var x=i/(n-1)*640, y=200-(v-lo)/(hi-lo)*190-5;
+    d+=(seen?'L':'M')+x.toFixed(1)+' '+y.toFixed(1)+' ';
+    seen=true;
+  });
+  var last=null;
+  for(var i=pts.length-1;i>=0;i--){if(pts[i]!==null){last=pts[i];break;}}
+  if(last===null){return;}
+  $('#drill-chart').innerHTML=
+    "<path d='"+d+"' fill='none' stroke='currentColor' stroke-width='1.5'/>";
+  $('#drill-title').textContent=tk+' — '+key;
+  $('#drill-note').textContent=
+    'now '+last.toFixed(1)+'  ·  range '+lo.toFixed(1)+'–'+hi.toFixed(1)+
+    '  ·  '+Math.round(pct*100)+'th percentile of its own history';
+  $('#drill').hidden=false;
+}
+
 function applyGroups(){
   Object.keys(st.groups).forEach(function(g){
     var on=!!st.groups[g];
@@ -764,6 +856,16 @@ $('#theme').addEventListener('click',function(){
 $$('tr.subhead').forEach(function(tr){
   tr.addEventListener('click',function(){tr.classList.toggle('closed');applyFilter();});
 });
+document.addEventListener('click',function(e){
+  var td=e.target.closest?e.target.closest('td.num.g-val'):null;
+  if(td){
+    var oh=td.getAttribute('data-oh');
+    if(oh!==null){
+      drawDrill(td.closest('tr').dataset.tk, KEYS[colOf(td)], parseFloat(oh));
+    }
+  }
+  if(e.target.closest&&e.target.closest('.drill-x')){$('#drill').hidden=true;}
+});
 $$('th.sortable').forEach(function(th){
   th.addEventListener('click',function(){
     var sc=null;
@@ -800,18 +902,20 @@ measure();applyGroups();applyTint();applyFilter();
 """
 
 
-def build_js(metrics: list) -> str:
+def build_js(metrics: list, series: dict | None = None) -> str:
     keys = [k for k, _l, _g, _f, _hb in metrics]
     labels = [l for _k, l, _g, _f, _hb in metrics]
     return (JS_TMPL
             .replace("__KEYS__", json.dumps(keys))
             .replace("__LABELS__", json.dumps(labels))
-            .replace("__STAMP__", json.dumps(datetime.now().strftime("%Y%m%d"))))
+            .replace("__STAMP__", json.dumps(datetime.now().strftime("%Y%m%d")))
+            .replace("__SERIES__", json.dumps(series or {})))
 
 
 def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
                  metrics: list, universe: dict, group_labels: dict,
-                 domains: dict, own: dict | None = None) -> str:
+                 domains: dict, own: dict | None = None,
+                 series: dict | None = None) -> str:
     asof = spx.get("asof", datetime.now(timezone.utc))
     asof_s = asof.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     sectors = "".join(
@@ -846,6 +950,14 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
 {TOOLBAR}
 {legend}
 {sectors}
+<div id="drill" hidden>
+  <div class="drill-card">
+    <button class="drill-x" aria-label="Close">x</button>
+    <h3 id="drill-title"></h3>
+    <svg id="drill-chart" viewBox="0 0 640 200" width="100%" height="200"></svg>
+    <p id="drill-note" class="na"></p>
+  </div>
+</div>
 <footer>
   Generated by <code>build_dashboard.py</code>. Fundamentals from Yahoo Finance via yfinance —
   figures are consensus/TTM as reported by the source and may lag or contain gaps.
@@ -855,5 +967,5 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
   directional screen, not investment advice.
 </footer>
 </div>
-<script>{build_js(metrics)}</script>
+<script>{build_js(metrics, series)}</script>
 </body></html>"""

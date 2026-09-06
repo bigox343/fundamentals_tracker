@@ -6,6 +6,67 @@ import pytest
 import render
 
 
+def out_v(entry):
+    return entry["v"][0]
+
+
+def test_encode_series_downsamples_to_weekly():
+    idx = pd.date_range("2021-09-01", periods=1270, freq="B")
+    frame = pd.DataFrame({"trailingPE": range(1270)}, index=idx, dtype=float)
+    out = render.encode_series(frame, every=5)
+    assert len(out["trailingPE"]["v"]) == pytest.approx(254, abs=2)
+    assert out["trailingPE"]["t0"] == "2021-09-01"
+
+
+def test_encode_series_rounds_to_four_significant_figures():
+    # Not four decimal places: round(1.23456789, 4) is 1.2346, which is what
+    # a naive port of the brief's own Step-3 snippet produces and which this
+    # assertion is written to catch -- 1.235 is the four-significant-figure
+    # answer.
+    idx = pd.date_range("2021-09-01", periods=10, freq="B")
+    frame = pd.DataFrame({"ps": [1.23456789] * 10}, index=idx)
+    out = render.encode_series(frame, every=1)
+    assert out_v(out["ps"]) == 1.235
+
+
+def test_encode_series_keeps_gaps_as_null_not_zero():
+    idx = pd.date_range("2021-09-01", periods=5, freq="B")
+    frame = pd.DataFrame({"ps": [1.0, float("nan"), 3.0, 4.0, 5.0]}, index=idx)
+    assert render.encode_series(frame, every=1)["ps"]["v"][1] is None
+
+
+def test_encode_series_omits_a_column_that_is_entirely_gaps():
+    # dropna().empty guards this -- an all-NaN column would otherwise embed a
+    # t0 and a v list of nulls for a metric nobody can chart.
+    idx = pd.date_range("2021-09-01", periods=5, freq="B")
+    frame = pd.DataFrame({"ps": [float("nan")] * 5}, index=idx)
+    assert "ps" not in render.encode_series(frame, every=1)
+
+
+def test_the_drilldown_reports_the_percentile_already_on_the_cell_not_a_recomputed_one():
+    # encode_series' own comment says percentiles are computed from the full
+    # daily series server-side; own_percentile (valuation.py) is what
+    # actually does that, from the un-downsampled frame. SERIES only ever
+    # carries the downsampled weekly points for the picture. If drawDrill
+    # re-derived a percentile from those weekly points (as the brief's Step 4
+    # snippet did, filtering pts for below/valid), the tint painted on the
+    # cell from data-oh and the number printed in the panel could disagree on
+    # screen at the same moment. Pinning this at the JS-source level because
+    # no JS runtime is available to execute drawDrill in this test suite.
+    assert "data-oh" in render.JS_TMPL
+    assert "below/valid" not in render.JS_TMPL
+    assert "v<last" not in render.JS_TMPL
+    assert "pts.filter" not in render.JS_TMPL
+
+
+def test_a_clickable_valuation_cell_gets_a_pointer_cursor_and_nothing_else():
+    # Exact string match, not a substring search for "cursor:pointer" alone --
+    # this pins that the rule carries no other declaration that could nudge
+    # cell width/height/padding, which the brief's no-new-columns constraint
+    # forbids.
+    assert "td.num.g-val[data-oh]{cursor:pointer}" in render.CSS
+
+
 def test_fmt_handles_each_kind():
     assert render.fmt(12.345, "x") == "12.3x"
     assert render.fmt(1.5e12, "bigusd") == "$1.50T"

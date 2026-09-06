@@ -678,12 +678,23 @@ def record_history(df, closes, closes_raw, est_rows, as_of, failed, own=None):
         conn.close()
 
 
-def own_history(conn, df) -> dict:
-    """(ticker, metric) -> own-range percentile, for pairs that passed the proof.
+def own_history(conn, df) -> tuple[dict, dict]:
+    """(ticker, metric) -> own-range percentile, and the chart payload to match.
 
-    A pair that failed gets no entry, so the frame renders blank rather than
-    wrong. Non-fatal for the same reason record_history() is: no valuation
-    history must ever cost you the dashboard.
+    Returns (percentiles, series_payload). A pair that failed the proof gets
+    no percentile, so the frame renders blank rather than wrong. Non-fatal
+    for the same reason record_history() is: no valuation history must ever
+    cost you the dashboard.
+
+    series_payload is built from the *same* pass over `ok` and MIN_HISTORY
+    that produces `percentiles`, rather than a second filter applied later --
+    embedding every column render.encode_series can see would ship 327 pairs
+    including metrics that failed the proof or are too short to have a
+    percentile (measured: 0.57 MB vs 0.30 MB for the 169 pairs a reader can
+    actually click). Deriving both dicts from one `ok`-filtered loop is what
+    keeps the clickable cells (data-oh) and the embedded chart data from ever
+    drifting apart -- there is no second gate to fall out of sync with this
+    one.
 
     build_all() is the expensive step here (measured ~11s across the full
     universe) and prove_xbrl.report() needs to run its proof against the
@@ -712,10 +723,18 @@ def own_history(conn, df) -> dict:
                 pct = valuation.own_percentile(frame[metric])
                 if pct is not None:
                     out[(ticker, metric)] = pct
-        return out
+        payload = {}
+        for ticker, frame in series.items():
+            cols = [m for m in frame.columns if (ticker, m) in out]
+            if not cols:
+                continue
+            enc = render.encode_series(frame[cols])
+            if enc:
+                payload[ticker] = enc
+        return out, payload
     except Exception as exc:  # noqa: BLE001
         print(f"  own-history frame unavailable: {exc}", file=sys.stderr)
-        return {}
+        return {}, {}
 
 
 def fetch_13f(force: bool = False) -> None:
@@ -954,12 +973,12 @@ def _run(args):
     print("Computing own-history valuation percentiles...")
     conn = history.connect()
     try:
-        own = own_history(conn, df)
+        own, own_series = own_history(conn, df)
     finally:
         conn.close()
 
     html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS,
-                              DOMAINS, own=own)
+                              DOMAINS, own=own, series=own_series)
     out = ROOT / "dashboard.html"
     out.write_text(html, encoding="utf-8")
     print(f"\nWrote {out}  ({len(df)} companies)")
