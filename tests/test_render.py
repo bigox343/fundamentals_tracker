@@ -286,3 +286,49 @@ def test_the_arrow_style_cannot_change_a_cell_metric():
         assert forbidden not in props, forbidden
     assert props <= {"font-size", "line-height", "margin-left", "color",
                      "display", "vertical-align"}, props
+
+
+def test_a_cell_carries_its_data_event_mark():
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {},
+        events={("ORCL", "trailingPE"): "revision"},
+    )
+    row = html[html.index('data-tk="ORCL"'):]
+    assert "data-rs='revision'" in row[:row.index("</tr>")]
+
+
+def test_a_cell_with_no_data_event_carries_no_mark():
+    html = render.render_sector(
+        "TMT", _one_band(), {}, [("trailingPE", "Trail P/E", "val", "x", False)],
+        {"TMT": ["Infra"]}, {"val": "Valuation"}, {}, events={},
+    )
+    assert "data-rs" not in html
+
+
+def test_the_marks_pass_runs_and_distinguishes_the_two_kinds():
+    assert "function marks()" in render.JS_TMPL
+    assert "marks();" in render.JS_TMPL, "defined but never called"
+    # the class is built as 'rs rs-'+rs, so the literal "rs-revision" never
+    # appears in the source -- assert the construction that produces it, which
+    # is what actually has to stay in step with the CSS.
+    assert "'rs rs-'+rs" in render.JS_TMPL
+    # the glyphs themselves, so a silent swap is caught
+    assert "'*'" in render.JS_TMPL and "'!'" in render.JS_TMPL
+
+
+def test_the_revision_mark_is_visually_distinct_from_the_report_mark():
+    # A report is ordinary and stays muted; a revision is the warning and must
+    # not rely on the glyph alone to carry that.
+    assert ".rs-revision{" in render.CSS
+    rule = render.CSS[render.CSS.index(".rs-revision{"):]
+    rule = rule[:rule.index("}")]
+    assert "color:" in rule
+
+
+def test_the_mark_style_cannot_change_a_cell_metric():
+    rule = render.CSS[render.CSS.index(".rs{"):]
+    rule = rule[:rule.index("}")]
+    props = {d.split(":")[0].strip() for d in rule.split("{")[1].split(";") if d}
+    for forbidden in ("padding", "height", "width", "margin-top", "float"):
+        assert forbidden not in props, forbidden

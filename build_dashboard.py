@@ -245,6 +245,24 @@ METRICS = [
     ("cash",         "Cash",          "bal",    "bigusd", None),
 ]
 
+# Which metrics a data-event mark can be inferred for, and how.
+#
+# A ratio carries price, so its implied fundamental is marketCap / metric --
+# without dividing that out, every trading day looks like a data event.
+# A direct metric IS the fundamental and needs no basis.
+#
+# EV/EBITDA is in neither, deliberately. Its implied fundamental needs an
+# enterprise value the store does not carry; dividing by market cap instead
+# leaves the debt term in the residual, which on the live snapshot table
+# yields 1,588 "revisions" against 43 for P/S -- that is the balance sheet
+# moving, not the source changing its mind. price and marketCap are excluded
+# for the opposite reason: they have no fundamental behind them at all.
+RATIO_EVENT_METRICS = frozenset({"ps", "forwardPE", "trailingPE"})
+DIRECT_EVENT_METRICS = frozenset({
+    "revGrowth", "epsGrowth", "grossMargin", "opMargin", "netMargin",
+    "roe", "netDebtEbitda", "fcf", "cash",
+})
+
 GROUP_LABELS = {
     "id": "", "val": "Valuation", "grow": "Growth",
     "prof": "Profitability", "bal": "Balance Sheet & Cash",
@@ -751,10 +769,19 @@ def own_history(conn, df) -> tuple[dict, dict]:
         except Exception as exc:  # noqa: BLE001
             print(f"  snapshot change frames unavailable: {exc}",
                   file=sys.stderr)
-        return out, payload, derived
+
+        # Separately again: a data-event mark is a warning about provenance,
+        # and losing it must not cost the numbers it would have annotated.
+        marks = {}
+        try:
+            marks = valuation.revision_marks(
+                conn, RATIO_EVENT_METRICS, DIRECT_EVENT_METRICS)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  revision marks unavailable: {exc}", file=sys.stderr)
+        return out, payload, derived, marks
     except Exception as exc:  # noqa: BLE001
         print(f"  own-history frame unavailable: {exc}", file=sys.stderr)
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
 
 def fetch_13f(force: bool = False) -> None:
@@ -993,13 +1020,13 @@ def _run(args):
     print("Computing own-history percentiles and change frames...")
     conn = history.connect()
     try:
-        own, own_series, changes = own_history(conn, df)
+        own, own_series, changes, events = own_history(conn, df)
     finally:
         conn.close()
 
     html = render.render_html(df, spx, proxies, METRICS, UNIVERSE, GROUP_LABELS,
                               DOMAINS, own=own, series=own_series,
-                              changes=changes)
+                              changes=changes, events=events)
     out = ROOT / "dashboard.html"
     out.write_text(html, encoding="utf-8")
     print(f"\nWrote {out}  ({len(df)} companies)")

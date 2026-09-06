@@ -26,6 +26,7 @@ from datetime import date
 import pandas as pd
 
 import history
+from history import reported
 import xbrl
 
 TTM_QUARTERS = 4
@@ -623,4 +624,103 @@ def snapshot_changes(conn, points_metrics: frozenset,
             value = change(series, sessions, points=metric in points_metrics)
             if value is not None:
                 out[(ticker, metric, name)] = value
+    return out
+
+
+# How close a data event must fall to a filing to be explained by it. A 10-Q
+# reaches a data vendor within a few days, not the same afternoon.
+FILING_WINDOW_DAYS = 5
+
+# How recently an event must have happened to still be worth marking on a cell.
+# Long enough to survive a weekend and a stale build, short enough that a mark
+# means "look at this now" rather than "something happened once".
+EVENT_RECENT_DAYS = 7
+
+
+def data_events(values: pd.Series, filings, basis: pd.Series | None = None,
+                deadband: float = 0.005) -> list:
+    """Days the implied fundamental moved, and whether a filing explains it.
+
+    A fundamental does not change daily, so any daily change in it is a data
+    event rather than a market event. Filing dates split those in two, and the
+    difference matters: one is information, the other is the source changing
+    its mind about the past.
+
+    `basis` is the price-like series to divide out for a ratio metric, so an
+    ordinary market move does not register as a data event -- dln M = dln P -
+    dln F, and without removing dln P every trading day looks like news. Pass
+    None for a metric that carries no price at all (a margin, a growth rate, a
+    balance), where the value IS the fundamental.
+
+    Deliberately not applied to EV/EBITDA. Its implied fundamental needs an
+    enterprise value, and dividing by price or market cap instead leaves the
+    debt term in the residual: measured on the live snapshot table that yields
+    1,588 "revisions" against 43 for P/S, which is the debt moving, not the
+    source. A mark that fires on ordinary balance-sheet drift would say the
+    opposite of what this mark is for.
+    """
+    series = pd.Series(values).dropna()
+    if basis is not None:
+        pair = pd.concat([pd.Series(basis).rename("b"), series.rename("m")],
+                         axis=1, join="inner").dropna()
+        pair = pair[(pair.b > 0) & (pair.m > 0)]
+        if len(pair) < 2:
+            return []
+        series = pair.b / pair.m
+    if len(series) < 2:
+        return []
+    filed = pd.DatetimeIndex(sorted(filings)) if len(filings) else None
+
+    out = []
+    previous = None
+    for when, value in series.items():
+        if previous is not None:
+            scale = abs(previous) if abs(previous) > 1e-9 else 1.0
+            if abs(value - previous) / scale >= deadband:
+                explained = filed is not None and len(filed) and any(
+                    0 <= gap <= FILING_WINDOW_DAYS for gap in (when - filed).days)
+                out.append((when.strftime("%Y-%m-%d"),
+                            "report" if explained else "revision"))
+        previous = value
+    return out
+
+
+def revision_marks(conn, ratio_metrics: frozenset, direct_metrics: frozenset,
+                   asof: str | None = None) -> dict:
+    """(ticker, metric) -> "report" | "revision", for the most recent event.
+
+    Only the newest event within EVENT_RECENT_DAYS marks a cell. A metric that
+    was revised two years ago is history, not a warning, and marking every cell
+    that ever moved would make the mark mean nothing.
+    """
+    frame = pd.read_sql_query(
+        "SELECT ticker, as_of, metric, value FROM metrics "
+        "WHERE period_type = 'snapshot'", conn)
+    if frame.empty:
+        return {}
+    wide = frame.pivot_table(index=["ticker", "as_of"], columns="metric",
+                             values="value")
+    latest = pd.Timestamp(asof) if asof else pd.Timestamp(
+        frame.as_of.max())
+    filings = {}
+    for ticker, group in reported(conn).groupby("ticker"):
+        filings[ticker] = pd.DatetimeIndex(sorted(set(group.filed)))
+
+    out: dict = {}
+    for ticker, group in wide.groupby(level=0):
+        group = group.copy()
+        group.index = pd.DatetimeIndex([d for _t, d in group.index])
+        cap = group["marketCap"] if "marketCap" in group else None
+        for metric in list(ratio_metrics) + list(direct_metrics):
+            if metric not in group:
+                continue
+            basis = cap if metric in ratio_metrics else None
+            if metric in ratio_metrics and basis is None:
+                continue
+            events = data_events(group[metric], filings.get(ticker, []),
+                                 basis=basis)
+            recent = [e for e in events
+                      if (latest - pd.Timestamp(e[0])).days <= EVENT_RECENT_DAYS]
+            if recent:
+                out[(ticker, metric)] = recent[-1][1]
     return out

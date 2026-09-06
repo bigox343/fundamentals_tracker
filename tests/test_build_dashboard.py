@@ -102,7 +102,7 @@ def test_own_history_keeps_only_pairs_that_passed_the_proof(monkeypatch):
         {"ticker": "MSFT", "metric": "trailingPE", "median_error": 0.5, "passed": False},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL", "MSFT"]})
-    out, _payload, _changes = bd.own_history(object(), df)
+    out, _payload, _changes, _marks = bd.own_history(object(), df)
     assert ("AAPL", "trailingPE") in out
     assert ("MSFT", "trailingPE") not in out, "a pair that failed the proof must not render"
 
@@ -114,7 +114,7 @@ def test_own_history_skips_a_pair_that_passed_but_lacks_enough_history(monkeypat
         {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL"]})
-    out, payload, _changes = bd.own_history(object(), df)
+    out, payload, _changes, _marks = bd.own_history(object(), df)
     assert out == {}, "MIN_HISTORY is not to be re-floored, but it must still be honored"
     assert payload == {}, "a pair with no percentile must not be embedded as a series either"
 
@@ -142,7 +142,7 @@ def test_own_history_series_payload_matches_the_percentile_set_exactly(monkeypat
         {"ticker": "AAPL", "metric": "ps", "median_error": 0.0, "passed": True},
     ]))
     df = pd.DataFrame({"ticker": ["AAPL"]})
-    out, payload, _changes = bd.own_history(object(), df)
+    out, payload, _changes, _marks = bd.own_history(object(), df)
     assert set(out) == {("AAPL", "trailingPE")}
     assert set(payload["AAPL"]) == {"trailingPE"}, (
         "ps passed the proof but has no percentile, so it must not be embedded"
@@ -173,7 +173,7 @@ def test_own_history_is_non_fatal_when_something_raises(monkeypatch, capsys):
         raise RuntimeError("SEC is down")
 
     monkeypatch.setattr(valuation, "build_all", _boom)
-    out, payload, changes = bd.own_history(
+    out, payload, changes, marks = bd.own_history(
         object(), pd.DataFrame({"ticker": ["AAPL"]}))
     assert out == {}
     assert payload == {}
@@ -194,7 +194,7 @@ def test_own_history_change_frames_exclude_pairs_that_failed_the_proof(monkeypat
         {"ticker": "AAPL", "metric": "trailingPE", "median_error": 0.0, "passed": True},
         {"ticker": "AAPL", "metric": "evEbitda", "median_error": 0.5, "passed": False},
     ]))
-    _out, _payload, changes = bd.own_history(
+    _out, _payload, changes, _marks = bd.own_history(
         object(), pd.DataFrame({"ticker": ["AAPL"]}))
     assert ("AAPL", "trailingPE", "c1w") in changes
     assert not any(m == "evEbitda" for _t, m, _w in changes)
@@ -212,7 +212,7 @@ def test_a_snapshot_failure_costs_the_change_frames_but_not_the_percentiles(monk
     def boom(*a, **k):
         raise RuntimeError("no snapshot table")
     monkeypatch.setattr(valuation, "snapshot_changes", boom)
-    out, _payload, changes = bd.own_history(
+    out, _payload, changes, _marks = bd.own_history(
         object(), pd.DataFrame({"ticker": ["AAPL"]}))
     assert ("AAPL", "trailingPE") in out, "percentiles must survive"
     assert ("AAPL", "trailingPE", "c1w") in changes, "derived changes too"

@@ -568,3 +568,59 @@ def test_changes_uses_the_points_kind_for_the_metrics_that_need_it():
     pt_out = valuation.changes(built, proven, frozenset({"trailingPE"}))
     assert log_out[("T", "trailingPE", "c1w")] == pytest.approx(math.log(1.1))
     assert pt_out[("T", "trailingPE", "c1w")] == pytest.approx(2.0)
+
+
+def _s(dates, values):
+    return pd.Series(values, index=pd.to_datetime(dates), dtype=float)
+
+
+def test_a_move_with_a_filing_behind_it_is_a_report():
+    mult = _s(["2026-07-30", "2026-07-31"], [20.0, 16.0])
+    cap = _s(["2026-07-30", "2026-07-31"], [100.0, 100.2])
+    assert valuation.data_events(mult, ["2026-07-31"], basis=cap) == \
+        [("2026-07-31", "report")]
+
+
+def test_avgo_2026_09_04_is_a_source_revision():
+    # The case from spec 2.4, confirmed against the live snapshot table: AVGO
+    # moved on twelve metrics at once on 2026-09-04 with its last periodic
+    # filing on 2026-06-09. Cash +22%, revGrowth +78%, epsGrowth +152%.
+    mult = _s(["2026-09-03", "2026-09-04"], [42.6, 33.4])
+    cap = _s(["2026-09-03", "2026-09-04"], [357.2, 357.9])
+    assert valuation.data_events(mult, ["2026-06-09"], basis=cap) == \
+        [("2026-09-04", "revision")]
+
+
+def test_an_ordinary_price_move_is_not_an_event():
+    # The whole reason for the basis: P and M moved together, so the implied
+    # fundamental did not move at all. Without dividing price out, every
+    # trading day would read as a data event.
+    mult = _s(["2026-09-03", "2026-09-04"], [20.0, 21.6])
+    cap = _s(["2026-09-03", "2026-09-04"], [100.0, 108.0])
+    assert valuation.data_events(mult, [], basis=cap) == []
+
+
+def test_a_move_inside_the_deadband_is_not_an_event():
+    mult = _s(["2026-09-03", "2026-09-04"], [20.0, 20.05])
+    cap = _s(["2026-09-03", "2026-09-04"], [100.0, 100.0])
+    assert valuation.data_events(mult, [], basis=cap) == []
+
+
+def test_a_direct_metric_needs_no_basis_to_show_a_revision():
+    # A margin carries no price, so the value IS the fundamental. AVGO's
+    # grossMargin moved on 2026-09-04 with no filing behind it.
+    margin = _s(["2026-09-03", "2026-09-04"], [63.5, 68.1])
+    assert valuation.data_events(margin, ["2026-06-09"]) == \
+        [("2026-09-04", "revision")]
+
+
+def test_a_direct_metric_that_did_not_move_is_not_an_event():
+    margin = _s(["2026-09-03", "2026-09-04"], [63.5, 63.5])
+    assert valuation.data_events(margin, []) == []
+
+
+def test_a_negative_valued_metric_still_yields_an_event():
+    # netDebtEbitda and the growth rates go negative; a ratio-based deadband
+    # would divide by a negative and mis-sign the comparison.
+    v = _s(["2026-09-03", "2026-09-04"], [-2.0, -3.0])
+    assert valuation.data_events(v, []) == [("2026-09-04", "revision")]

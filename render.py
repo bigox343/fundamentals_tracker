@@ -231,7 +231,8 @@ def band_perf(band: str, proxies: dict) -> str:
 def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                    metrics: list, universe: dict, group_labels: dict,
                    domains: dict, own: dict | None = None,
-                   changes: dict | None = None) -> str:
+                   changes: dict | None = None,
+                   events: dict | None = None) -> str:
     gcount = {}
     for _k, _l, g, _f, _hb in metrics:
         gcount[g] = gcount.get(g, 0) + 1
@@ -326,6 +327,11 @@ def render_sector(sector: str, df: pd.DataFrame, proxies: dict,
                     scaled = max(-1.0, min(1.0, sign * delta / span))
                     attrs += (f" data-{window}='{delta:.5f}'"
                               f" data-{window}s='{scaled:.4f}'")
+                # A recent data event: the implied fundamental moved, and
+                # whether a filing accounts for it is the whole distinction.
+                mark = (events or {}).get((tk, key))
+                if mark:
+                    attrs += " data-rs='" + mark + "'"
                 # A missing score is ambiguous on its own: test_domains.py's
                 # 3-name band (-5.0, -3.0, 12.0) excludes the two negatives,
                 # leaving one valid value under relative_scores' floor of
@@ -619,6 +625,8 @@ td.num.g-val[data-oh]{cursor:pointer}
 /* inline-block with no height of its own and a font smaller than the row's
    line-height, so it cannot grow a cell or wrap a line */
 .arw{font-size:8px;line-height:1;margin-left:3px;color:var(--muted);display:inline-block;vertical-align:middle;}
+.rs{font-size:9px;line-height:1;margin-left:2px;cursor:help;display:inline-block;vertical-align:middle;color:var(--muted);}
+.rs-revision{color:#e34948;font-weight:600;}
 #drill{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;
        align-items:center;justify-content:center;z-index:50;}
 #drill[hidden]{display:none;}
@@ -784,6 +792,27 @@ function arrows(){
     s.textContent=v>0?'\u25b2':'\u25bc';
     s.setAttribute('aria-hidden','true');
     td.appendChild(s);
+  });
+  marks();
+}
+
+// * a filing accounts for the move; ! nothing does, so the source revised
+// itself. Kept as a glyph rather than folded into the tint because it is a
+// statement about the number's provenance, not its level -- a reader wants
+// both at once, and a colour can only say one thing at a time.
+function marks(){
+  $$('td.num').forEach(function(td){
+    var old=td.querySelector('.rs');
+    if(old){old.remove();}
+    var rs=td.getAttribute('data-rs');
+    if(!rs){return;}
+    var m=document.createElement('span');
+    m.className='rs rs-'+rs;
+    m.textContent=(rs==='report')?'*':'!';
+    m.title=(rs==='report')
+      ? 'Moved on a new filing \u2014 real information'
+      : 'Moved with no filing behind it \u2014 the source revised itself';
+    td.appendChild(m);
   });
 }
 function applyTint(){
@@ -978,12 +1007,14 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
                  metrics: list, universe: dict, group_labels: dict,
                  domains: dict, own: dict | None = None,
                  series: dict | None = None,
-                 changes: dict | None = None) -> str:
+                 changes: dict | None = None,
+                 events: dict | None = None) -> str:
     asof = spx.get("asof", datetime.now(timezone.utc))
     asof_s = asof.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     sectors = "".join(
         render_sector(sec, df[df.sector == sec], proxies, metrics, universe,
-                      group_labels, domains, own=own, changes=changes)
+                      group_labels, domains, own=own, changes=changes,
+                      events=events)
         for sec in universe
     )
     spx_html = render_spx(spx, df, proxies, universe)
@@ -1007,6 +1038,13 @@ def render_html(df: pd.DataFrame, spx: dict, proxies: dict,
         "from the snapshot table, which has accrued enough for 1 week but not "
         "yet a month, so those cells stay untinted on <b>change 1m</b> rather "
         "than reading as no change.</span>"
+        "<span class='na'><b>*</b> and <b class='rs-revision'>!</b> mark a cell "
+        "whose underlying figure moved in the last week. <b>*</b> means a "
+        "filing lands within five days of the move, so it is real information. "
+        "<b class='rs-revision'>!</b> means none does \u2014 the source revised "
+        "itself about the past. Not shown on EV/EBITDA, whose implied "
+        "fundamental needs an enterprise value this store does not carry, so a "
+        "mark there would fire on ordinary balance-sheet drift instead.</span>"
         "</div>"
     )
     return f"""<!doctype html>
