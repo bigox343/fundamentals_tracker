@@ -246,3 +246,18 @@ def test_ingest_without_a_manifest_still_works(tmp_path):
                  ).to_csv(archive, index=False, compression="gzip")
     rows, filings = edgar.ingest_archives([archive], {"007903107": "AMD"})
     assert len(rows) == 1 and len(filings) == 1
+
+
+def test_sec_get_does_not_back_off_after_its_final_attempt(monkeypatch):
+    # The sleep before a retry is the point; the sleep before raising is dead
+    # wall clock. A full XBRL sweep takes the failure path thousands of times.
+    slept = []
+    monkeypatch.setattr(edgar.time, "sleep", lambda s: slept.append(s))
+
+    def always_fail(*a, **k):
+        raise OSError("nope")
+
+    monkeypatch.setattr(edgar.urllib.request, "urlopen", always_fail)
+    with pytest.raises(OSError):
+        edgar.sec_get("https://example.invalid/x", tries=3)
+    assert len(slept) == 2, f"3 attempts need 2 waits, not {len(slept)}: {slept}"

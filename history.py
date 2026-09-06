@@ -325,7 +325,7 @@ def last_filed(conn: sqlite3.Connection) -> dict[str, str]:
     retention policy data/ is on.
     """
     return {t: d for t, d in conn.execute(
-        "SELECT ticker, MAX(filed) FROM reported GROUP BY ticker")}
+        "SELECT ticker, MAX(filed) AS filed FROM reported GROUP BY ticker")}
 
 
 def write_reported_csv(conn: sqlite3.Connection, path) -> int:

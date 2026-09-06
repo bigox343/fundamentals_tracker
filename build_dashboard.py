@@ -11,10 +11,10 @@ Usage:
     python build_dashboard.py --no-fetch # rebuild from the newest cached CSV
 
 Metrics (all groups): valuation, growth, profitability, balance-sheet/cash.
-Heatmap coloring uses the validated colorblind-safe diverging blue<->red palette
-(blue = more favorable than sector peers, red = less favorable). The 6M price
-sparklines reuse that same pair for direction — green/red would fail protanope
-separation (OKLab ΔE 2.9 vs the 8.0 target); blue/red clears it at 20.4.
+Rendering lives in render.py -- the palette, the sparklines and every
+string of markup -- so this module is the universe, the fetch and the run
+flow. The reasoning behind the colour choices sits beside the code that
+applies them, in render.CSS and render.cell_style.
 """
 from __future__ import annotations
 

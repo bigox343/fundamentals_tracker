@@ -59,11 +59,11 @@ run_daily.sh
   └── build_dashboard.py
         ├── fetch_all()            fundamentals for 153 tickers
         ├── attach_history()       1y closes (YTD/1Y returns need the full year)
-        │     └── data/fundamentals_YYYYMMDD.csv     (written, never pruned)
+        │     └── data/fundamentals_YYYYMMDD.csv     (newest RETAIN_DATED kept)
         ├── extract.collect_estimates()
-        │     └── data/estimates_YYYYMMDD.csv.gz     (written, never pruned)
+        │     └── data/estimates_YYYYMMDD.csv.gz     (newest RETAIN_DATED kept)
         ├── fetch_13f()            quarterly; usually makes no request at all
-        │     ├── data/13f_YYYYQN.csv.gz             (written, never pruned)
+        │     ├── data/13f_YYYYQN.csv.gz             (newest RETAIN_DATED kept)
         │     └── data/13f_filings.csv.gz            (manifest of every filing)
         ├── fetch_closes(period=5y)
         ├── record_history()  ──►  data/history.db

@@ -235,7 +235,12 @@ def sec_get(url: str, tries: int = 3) -> bytes:
             return gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
         except Exception as exc:  # noqa: BLE001 - retried, then surfaced
             last = exc
-            time.sleep(1.5 * (attempt + 1))
+            # No backoff after the final attempt: there is nothing left to
+            # back off before. On a full XBRL sweep the absent-tag path is
+            # taken thousands of times, and sleeping 1.5 * tries seconds each
+            # time before raising anyway is pure wall clock.
+            if attempt < tries - 1:
+                time.sleep(1.5 * (attempt + 1))
     raise last  # type: ignore[misc]
 
 
