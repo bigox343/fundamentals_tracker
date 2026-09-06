@@ -128,12 +128,29 @@ def _known_at(facts, on: str) -> dict:
 
 
 def ttm_at(facts, on: str) -> float | None:
-    """Trailing-twelve-month total as it was knowable on `on`."""
+    """Trailing-twelve-month total as it was knowable on `on`.
+
+    "The four newest facts by period_end" is not the same claim as "four
+    quarters covering about a year" -- it is only safe when the concept has
+    dense quarterly coverage. Cash-flow concepts do not: cfo has a median of
+    28 stored facts per ticker and capex 32, against netIncome's 170 (MSFT
+    alone publishes 76 quarterly cfo facts against 212 for net income), so
+    with roughly 1.4 quarters available per year the four newest can be
+    scattered across three years. Summed anyway, that produces a wrong number
+    that looks exactly like a real TTM -- worse than an absent one, because it
+    carries no signal that anything is off. classify_span's annual band
+    (350-380 days) already accommodates 4-4-5 calendars and 52/53-week years,
+    so it is reused here rather than inventing a second tolerance: if the four
+    newest facts, taken together, do not span about a year, there is no TTM.
+    """
     known = _known_at(facts, on)
     if len(known) < TTM_QUARTERS:
         return None
     newest = sorted(known.values(), key=lambda f: f.period_end,
                     reverse=True)[:TTM_QUARTERS]
+    oldest = min(newest, key=lambda f: f.period_start)
+    if xbrl.classify_span(oldest.period_start, newest[0].period_end) != "annual":
+        return None
     return float(sum(f.value for f in newest))
 
 
@@ -159,23 +176,32 @@ def ttm_series(facts, dates) -> pd.Series:
     return stepped.reindex(stepped.index.union(index)).ffill().reindex(index)
 
 
-def _positive_shares(share_facts):
+def _drop_impossible_shares(share_facts):
     """Drop a share fact that cannot be real: a share count is never <= 0.
 
-    reported's Q4 facts are synthesized as FY - (Q1+Q2+Q3) uniformly for every
-    duration concept (xbrl.quarterly()), which is correct for an additive
-    total -- net income, revenue -- but WeightedAverageNumberOfDiluted
-    SharesOutstanding is a period AVERAGE, not a sum: the annual average
-    is close to any one quarter's average, not four times it, so FY - 3
-    quarters comes out close to -2x the true count. Measured on the live
-    store: MSFT's synthesized FY2024/2025/2026 Q4 share counts are all
-    -14.9e9 against a true ~7.45e9; 13 of 149 tickers carry at least one
-    negative synthesized share fact. This is a defect in xbrl.quarterly()'s
-    Q4 reconstruction, not something valuation.py can repair -- quarterly()
-    has no way to know which concepts are additive -- so the fix here is not
-    to un-corrupt the value but to refuse it: drop it and let the last
-    genuinely-filed quarter's count carry forward instead of a value that
-    would turn a market cap negative.
+    The root cause this guards against is fixed: xbrl.quarterly() used to
+    synthesize a Q4 for WeightedAverageNumberOfDilutedSharesOutstanding as
+    FY - (Q1+Q2+Q3), correct for an additive concept but wrong for a period
+    AVERAGE, and came out near -2x the true count (Task 11 measured MSFT's
+    synthesized Q4s at -14.9e9 against a true ~7.45e9). Task 11.5 moved that
+    fix into xbrl.quarterly() itself (NON_ADDITIVE_CONCEPTS), verified by
+    guard-mutation, so no *future* sweep can write one of these again.
+
+    This filter stays anyway, because the fix does not reach backwards: the
+    live store (data/history.db) was populated by the pre-fix code and still
+    holds 4,526 such rows across 133 of 149 tickers -- upsert_reported only
+    ever inserts or updates a row at (ticker, concept, period_end,
+    period_start, filed), so a concept the fixed code no longer emits simply
+    never overwrites the bad row already sitting at that key. Measured
+    directly: with this filter removed, NKE and TEAM's reconstructed market
+    cap for 2026-09-06 was off by 299% and 308% (their most recently filed
+    quarter is currently one of these poisoned Q4s), against 0.0% and n/a
+    with it restored. A one-time
+    `DELETE FROM reported WHERE concept='WeightedAverageNumberOfDilutedSharesOutstanding' AND value<0`
+    against the live store, followed by rewriting data/reported.csv.gz,
+    would let this filter retire; this task's sandbox would not grant
+    permission to run that statement (see task-11.5-report.md), so the
+    cleanup is left for whoever next touches the store with that access.
     """
     return [f for f in share_facts if f.value > 0]
 
@@ -189,8 +215,14 @@ def split_factors(share_facts) -> pd.Series:
     for exactly this in the 13F path -- share counts there are as-filed while
     stored closes are back-adjusted, and a 25:1 split rendered as a manager
     adding 2,400%.
+
+    Filters through _drop_impossible_shares independently of shares_series --
+    both are public functions callers may use directly (shares_series has its
+    own tests calling it standalone below), so each must be robust to a
+    poisoned fact on its own rather than relying on the other to have cleaned
+    the input first.
     """
-    share_facts = _positive_shares(share_facts)
+    share_facts = _drop_impossible_shares(share_facts)
     ordered = sorted({f.period_end: f for f in share_facts}.values(),
                      key=lambda f: f.period_end)
     ends = [f.period_end for f in ordered]
@@ -207,16 +239,82 @@ def split_factors(share_facts) -> pd.Series:
     return factors
 
 
-def shares_series(share_facts, dates) -> pd.Series:
-    """Split-adjusted diluted shares, forward-filled onto `dates`.
+def _prefer_live(preferred: list, fallback: list) -> list:
+    """Facts from `preferred` wherever it is live, `fallback` elsewhere.
 
-    Filters through _positive_shares independently of split_factors -- both
-    are public functions callers may use directly (split_factors already has
-    its own tests calling it standalone), so each must be robust to a
-    negative synthesized fact on its own rather than relying on the other to
-    have cleaned the input first.
+    This is the dei:EntityCommonStockSharesOutstanding vs WeightedAverage
+    NumberOfDilutedSharesOutstanding problem, and it is the same shape
+    xbrl.splice already solves for one concept's own chain members: a tag
+    that stopped being filed must not be trusted just because it used to be
+    the right one. CHTR's dei series stops at 2016-08-09 -- unguarded, its
+    decade-old count forward-fills straight into 2026 and overstates market
+    cap by 101%.
+
+    Unlike splice's election (the live tag with the MOST facts wins), the
+    preference order here is fixed: `preferred` wins whenever it is live,
+    regardless of which side has more facts. A cover-page count tagged once
+    per filing will almost always have fewer entries than a weighted-average
+    figure re-filed as every later quarter's own comparative, and a
+    fact-count contest would hand the market-cap basis right back to the
+    average it exists to replace.
     """
-    share_facts = _positive_shares(share_facts)
+    if not preferred:
+        return fallback
+    if not fallback:
+        return preferred
+    newest = max(f.period_end for f in preferred + fallback)
+    preferred_newest = max(f.period_end for f in preferred)
+    gap = (date.fromisoformat(newest)
+           - date.fromisoformat(preferred_newest)).days
+    if gap > xbrl.LIVE_WINDOW_DAYS:
+        return fallback   # preferred has gone stale; none of it is usable
+    cut = min(f.period_end for f in preferred)
+    return preferred + [f for f in fallback if f.period_end < cut]
+
+
+def _sum_same_filing(facts: list) -> list:
+    """Collapse a multi-class filer's several cover-page entries into one.
+
+    dei:EntityCommonStockSharesOutstanding is tagged once per class of stock
+    for a filer with more than one -- each entry is a real share count for
+    one class, sharing the same filed date (and, since these are instant
+    facts on the same cover page, the same period_end), and the market-cap
+    basis wants their sum, not one taken arbitrarily. Grouped on the pair
+    rather than filed alone as a defensive measure: nothing observed in the
+    store carries two different period_ends under one filed date for this
+    concept, but collapsing across periods by accident would be silent and
+    much worse than doing nothing on the rare filing that did.
+    """
+    by_key: dict[tuple[str, str], list] = {}
+    for f in facts:
+        by_key.setdefault((f.filed, f.period_end), []).append(f)
+    out = []
+    for group in by_key.values():
+        rep = group[0]
+        out.append(rep if len(group) == 1
+                   else rep._replace(value=sum(g.value for g in group)))
+    return out
+
+
+def shares_series(share_facts, dates, dei_facts=None) -> pd.Series:
+    """Split-adjusted shares outstanding, forward-filled onto `dates`.
+
+    `dei_facts` (dei:EntityCommonStockSharesOutstanding, the actual count SEC
+    requires on every filing's cover page) is preferred over `share_facts`
+    (WeightedAverageNumberOfDilutedSharesOutstanding, correct for EPS but a
+    period average rather than a point-in-time count) via _prefer_live,
+    wherever dei is live; it falls back to `share_facts` for any stretch dei
+    does not cover. Defaults to None so a caller with only the weighted-
+    average series keeps behaving exactly as before.
+
+    Filters through _drop_impossible_shares independently of split_factors --
+    see that function's docstring for why the guard still has live rows to
+    catch even though its root cause (xbrl.quarterly()'s Q4 synthesis) is
+    fixed. dei_facts is not filtered here: it is never run through
+    quarterly() (INSTANT_CONCEPTS), so it cannot carry this defect.
+    """
+    share_facts = _drop_impossible_shares(share_facts)
+    share_facts = _prefer_live(dei_facts or [], share_facts)
     factors = split_factors(share_facts)
     adjusted = [
         (f.filed, f.value * float(factors.get(f.period_end, 1.0)))
@@ -294,7 +392,8 @@ def multiple_series(ticker: str, facts_by_tag: dict,
     applies: a negative denominator makes the multiple absent, not cheap.
     """
     dates = pd.DatetimeIndex(closes_raw.index)
-    shares = shares_series(facts_by_tag.get("shares", []), dates)
+    shares = shares_series(facts_by_tag.get("shares", []), dates,
+                           dei_facts=facts_by_tag.get("sharesOutstanding", []))
     cap = closes_raw.astype(float) * shares
 
     out = pd.DataFrame(index=dates)
@@ -337,6 +436,7 @@ def own_percentile(series: pd.Series) -> float | None:
 
 
 _CHAINS = xbrl.CONCEPTS
+_DEI_CHAINS = xbrl.DEI_CONCEPTS
 
 # SEC's Pay-versus-Performance rule (Item 402(v)) requires a proxy statement
 # to disclose "Net Income" in its executive-compensation table, and filers'
@@ -402,6 +502,8 @@ def build_all(conn, tickers) -> dict:
         tf = facts[facts.ticker == ticker]
         by_tag = {name: _facts_for(tf, chain)
                   for name, chain in _CHAINS.items()}
+        by_tag.update({name: _sum_same_filing(_facts_for(tf, chain))
+                      for name, chain in _DEI_CHAINS.items()})
         try:
             out[ticker] = multiple_series(ticker, by_tag, series)
         except ValueError as exc:
@@ -415,7 +517,7 @@ def build_all(conn, tickers) -> dict:
             culprit = "unknown"
             dates = pd.DatetimeIndex(series.index)
             for name in by_tag:
-                if name in ("debtLT", "debtST", "cash"):
+                if name in ("debtLT", "debtST", "cash", "sharesOutstanding"):
                     continue  # these use latest_series, not ttm -- cannot raise
                 try:
                     _ttm(by_tag, name, dates)

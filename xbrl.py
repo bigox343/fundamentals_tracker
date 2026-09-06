@@ -23,7 +23,7 @@ from edgar import sec_get
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 CONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
-               "CIK{cik}/us-gaap/{concept}.json")
+               "CIK{cik}/{taxonomy}/{concept}.json")
 
 # Concept chains. Multiples are built from aggregates rather than per-share
 # figures, so that a split cannot corrupt them: a dollar total carries no share
@@ -70,11 +70,45 @@ CONCEPTS: dict[str, tuple[str, ...]] = {
     "epsDiluted": ("EarningsPerShareDiluted",),
 }
 
+# Entity-cover-page facts, from the dei taxonomy rather than us-gaap -- a
+# different namespace on the same companyconcept endpoint (CONCEPT_URL takes
+# `taxonomy` as a parameter for exactly this). EntityCommonStockShares
+# Outstanding is the actual share count SEC requires on every filing's cover
+# page, an instant, not an average -- the correct basis for market cap, where
+# CONCEPTS["shares"] (WeightedAverageNumberOfDilutedSharesOutstanding) is
+# correct for EPS but wrong here for the same reason a period average is
+# never a point-in-time count.
+DEI_CONCEPTS: dict[str, tuple[str, ...]] = {
+    "sharesOutstanding": ("EntityCommonStockSharesOutstanding",),
+}
+
 # Balance-sheet concepts are reported as an instant -- a level on a date -- not
 # as a duration. They must never go through quarterly(), which keeps only
 # three-month spans and would drop every one of them, nor be summed over four
-# quarters, which would count the same cash four times.
-INSTANT_CONCEPTS = frozenset({"cash", "debtLT", "debtST"})
+# quarters, which would count the same cash four times. sharesOutstanding is
+# the same shape: a count on the filing's cover date, not a span.
+INSTANT_CONCEPTS = frozenset({"cash", "debtLT", "debtST", "sharesOutstanding"})
+
+# A concept whose annual figure is not the sum of its quarters -- a rate, a
+# ratio, an average, or a per-share figure -- must never have its Q4
+# synthesized as FY - (Q1+Q2+Q3): that arithmetic assumes four quarters add up
+# to the year, which is true for a flow (net income, revenue) and false for
+# these. WeightedAverageNumberOfDilutedSharesOutstanding is a period AVERAGE:
+# a filer's annual average sits close to any one quarter's average, not four
+# times it, so FY-3Q comes out near -2x the true count. Measured live: MSFT's
+# synthesized FY2024/2025/2026 Q4 share facts were all -14.9e9 against a true
+# ~7.45e9, and 13 of 149 tickers carried at least one such fact. Task 11
+# worked around this downstream in valuation.py (a share count can never be
+# <= 0, so a negative one was dropped); the real defect is here, in
+# quarterly()'s uniform reconstruction, which had no way to know a tag was
+# non-additive. EarningsPerShareDiluted is the same kind of figure for the
+# same reason, even though nothing in this codebase sums it today -- it is
+# fetched only as an independent cross-check (see CONCEPTS's comment) and a
+# future caller that starts using it must not inherit this trap.
+NON_ADDITIVE_CONCEPTS = frozenset({
+    "WeightedAverageNumberOfDilutedSharesOutstanding",
+    "EarningsPerShareDiluted",
+})
 
 
 class Fact(NamedTuple):
@@ -327,6 +361,8 @@ def quarterly(facts: list[Fact]) -> list[Fact]:
         by_concept.setdefault(f.concept, []).append(f)
 
     for concept, concept_facts in by_concept.items():
+        if concept in NON_ADDITIVE_CONCEPTS:
+            continue  # FY - (Q1+Q2+Q3) is meaningless for a non-additive tag
         # Snapshot before the loop below appends to `kept`: a Q4 synthesized
         # earlier in this same pass must not become a candidate quarter for a
         # later annual fact of the same concept.
@@ -382,8 +418,13 @@ def ticker_cik_map() -> dict[str, str]:
     return parse_ticker_map(sec_get(TICKER_MAP_URL))
 
 
-def fetch_concept(cik: str, tag: str, tries: int = 3) -> bytes:
+def fetch_concept(cik: str, tag: str, taxonomy: str = "us-gaap",
+                  tries: int = 3) -> bytes:
     """One companyconcept document. Measured 18-51 KB for AAPL/ORCL tags.
+
+    `taxonomy` defaults to "us-gaap" so every pre-existing call site is
+    unchanged; DEI_CONCEPTS' cover-page facts live under "dei" on the same
+    endpoint.
 
     A 404 means "this filer does not use this tag" -- the normal, expected
     outcome for roughly 4-6 of the ~14 tags a full sweep probes per ticker:
@@ -403,7 +444,7 @@ def fetch_concept(cik: str, tag: str, tries: int = 3) -> bytes:
     reset -- genuinely transient, unlike a missing tag -- still gets the same
     3-try, 1.5/3.0/4.5s-backoff schedule sec_get itself would have given it.
     """
-    url = CONCEPT_URL.format(cik=cik, concept=tag)
+    url = CONCEPT_URL.format(cik=cik, taxonomy=taxonomy, concept=tag)
     last: Exception | None = None
     for attempt in range(tries):
         try:

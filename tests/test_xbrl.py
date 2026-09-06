@@ -149,6 +149,37 @@ def test_a_null_filed_writes_no_fact():
     assert xbrl.parse_concept("T", "NetIncomeLoss", raw) == []
 
 
+def test_fetch_concept_defaults_to_the_us_gaap_taxonomy(monkeypatch):
+    # Every pre-existing call site passes only (cik, tag); adding a taxonomy
+    # parameter must not change the URL any of them hits.
+    urls = []
+
+    def fake_sec_get(url, tries=3):
+        urls.append(url)
+        return b"{}"
+
+    monkeypatch.setattr(xbrl, "sec_get", fake_sec_get)
+    xbrl.fetch_concept("0000320193", "NetIncomeLoss")
+    assert urls == [
+        "https://data.sec.gov/api/xbrl/companyconcept/"
+        "CIK0000320193/us-gaap/NetIncomeLoss.json"]
+
+
+def test_fetch_concept_can_ask_for_the_dei_taxonomy(monkeypatch):
+    urls = []
+
+    def fake_sec_get(url, tries=3):
+        urls.append(url)
+        return b"{}"
+
+    monkeypatch.setattr(xbrl, "sec_get", fake_sec_get)
+    xbrl.fetch_concept("0000320193", "EntityCommonStockSharesOutstanding",
+                       taxonomy="dei")
+    assert urls == [
+        "https://data.sec.gov/api/xbrl/companyconcept/"
+        "CIK0000320193/dei/EntityCommonStockSharesOutstanding.json"]
+
+
 def test_fetch_concept_treats_a_404_as_absent_without_retrying(monkeypatch):
     # Measured: edgar.sec_get's default retry (3 tries, 1.5+3.0+4.5s backoff)
     # turns a 404 -- the normal outcome when a filer does not use a tag --
@@ -417,6 +448,52 @@ def test_which_filings_survive_does_not_depend_on_input_order():
     key = lambda fs: sorted(  # noqa: E731
         (f.concept, f.period_start, f.period_end, f.filed, f.value) for f in fs)
     assert key(forward) == key(backward)
+
+
+def test_quarterly_never_synthesizes_a_q4_for_a_non_additive_concept():
+    # WeightedAverageNumberOfDilutedSharesOutstanding is a period AVERAGE, not
+    # a sum: an annual average sits close to any one quarter's, not four
+    # times it, so FY-(Q1+Q2+Q3) comes out near -2x the true count. Measured
+    # live: MSFT's synthesized share-count Q4s were all -14.9e9 against a
+    # true ~7.45e9. The fix is to never attempt the arithmetic for this
+    # concept, not to filter what it produces.
+    filed = "2026-07-29"
+    facts = [
+        _rev("WeightedAverageNumberOfDilutedSharesOutstanding",
+            "2025-09-30", "2025-07-01", filed, 7.40e9),
+        _rev("WeightedAverageNumberOfDilutedSharesOutstanding",
+            "2025-12-31", "2025-10-01", filed, 7.42e9),
+        _rev("WeightedAverageNumberOfDilutedSharesOutstanding",
+            "2026-03-31", "2026-01-01", filed, 7.46e9),
+        _rev("WeightedAverageNumberOfDilutedSharesOutstanding",
+            "2026-06-30", "2025-07-01", filed, 7.45e9),
+    ]
+    out = xbrl.quarterly(facts)
+    assert [f for f in out if f.period_end == "2026-06-30"] == [], \
+        "no Q4 may be synthesized for a concept that is not additive"
+
+
+def test_quarterly_never_synthesizes_a_q4_for_diluted_eps():
+    filed = "2026-07-29"
+    facts = [
+        _rev("EarningsPerShareDiluted", "2025-09-30", "2025-07-01", filed, 1.10),
+        _rev("EarningsPerShareDiluted", "2025-12-31", "2025-10-01", filed, 1.20),
+        _rev("EarningsPerShareDiluted", "2026-03-31", "2026-01-01", filed, 1.05),
+        _rev("EarningsPerShareDiluted", "2026-06-30", "2025-07-01", filed, 4.60),
+    ]
+    out = xbrl.quarterly(facts)
+    assert [f for f in out if f.period_end == "2026-06-30"] == []
+
+
+def test_dei_concepts_names_the_cover_page_share_count():
+    assert xbrl.DEI_CONCEPTS["sharesOutstanding"] == \
+        ("EntityCommonStockSharesOutstanding",)
+
+
+def test_shares_outstanding_is_on_the_instant_path():
+    # An instant fact has no duration; running it through quarterly() would
+    # drop every one of them, the same trap cash and debt already avoid.
+    assert "sharesOutstanding" in xbrl.INSTANT_CONCEPTS
 
 
 def test_quarterly_groups_by_concept_before_reconstructing_a_q4():

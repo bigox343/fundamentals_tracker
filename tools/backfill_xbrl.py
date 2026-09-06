@@ -54,6 +54,16 @@ def due(tickers, last: dict[str, str], today: str,
     return out
 
 
+# Every concept the sweep probes, us-gaap and dei alike, each tagged with the
+# taxonomy its companyconcept endpoint lives under. DEI_CONCEPTS' cover-page
+# facts (EntityCommonStockSharesOutstanding) are a different namespace on the
+# same API, not a different API -- CONCEPT_URL/fetch_concept already
+# parameterize it.
+_SWEEP_CONCEPTS: list[tuple[str, tuple[str, ...], str]] = (
+    [(name, chain, "us-gaap") for name, chain in xbrl.CONCEPTS.items()]
+    + [(name, chain, "dei") for name, chain in xbrl.DEI_CONCEPTS.items()])
+
+
 def sweep_ticker(ticker: str, cik: str, fetch) -> list:
     """Every concept for one ticker, every chain member the sweep fetched.
 
@@ -68,11 +78,11 @@ def sweep_ticker(ticker: str, cik: str, fetch) -> list:
     """
     facts: list = []
     try:
-        for name, chain in xbrl.CONCEPTS.items():
+        for name, chain, taxonomy in _SWEEP_CONCEPTS:
             parsed: list = []
             for tag in chain:
                 try:
-                    raw = fetch(cik, tag)
+                    raw = fetch(cik, tag, taxonomy)
                 except Exception:       # noqa: BLE001 - a missing tag is normal
                     continue
                 time.sleep(FETCH_SLEEP)

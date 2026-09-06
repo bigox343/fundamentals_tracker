@@ -5,6 +5,7 @@ import pytest
 
 import history
 import valuation
+import xbrl
 from xbrl import Fact
 
 
@@ -49,6 +50,43 @@ def test_an_amendment_supersedes_the_original_only_after_it_is_filed():
     assert valuation.ttm_at(facts, "2026-10-01") == pytest.approx(1230.0)
 
 
+def test_four_contiguous_quarters_still_produce_a_ttm():
+    # The guard added for the "scattered across three years" defect below
+    # must not reject the ordinary case: _four_quarters() already spans about
+    # a year (2025-07-01..2026-06-30, 364 days), which is exactly what the
+    # guard is supposed to let through.
+    assert valuation.ttm_at(_four_quarters(), "2026-08-01") == pytest.approx(460.0)
+
+
+def test_four_quarters_scattered_across_three_years_yield_no_ttm():
+    # cfo and capex are cumulative, sparsely-covered concepts: a median of
+    # 28-32 stored facts per ticker against netIncome's 170. With roughly 1.4
+    # quarters available per year, "the four newest by period_end" can be
+    # four quarters from four different years rather than four consecutive
+    # ones -- summed anyway, that is a wrong TTM, not an absent one.
+    facts = [
+        _q("2023-06-30", "2023-07-30", 10.0, "2023-04-01"),
+        _q("2024-06-30", "2024-07-30", 20.0, "2024-04-01"),
+        _q("2025-06-30", "2025-07-30", 30.0, "2025-04-01"),
+        _q("2026-06-30", "2026-07-30", 40.0, "2026-04-01"),
+    ]
+    assert valuation.ttm_at(facts, "2026-08-01") is None
+
+
+def test_a_52_53_week_filers_four_quarters_still_produce_a_ttm():
+    # classify_span's annual band (350-380 days) exists precisely so a long
+    # fiscal year does not get rejected by a guard meant to catch scattered
+    # quarters. 2025-09-29..2026-10-05 is the same 371-day span
+    # test_a_53_week_year_is_still_an_annual_span in test_xbrl.py uses.
+    facts = [
+        _q("2025-12-29", "2026-01-20", 10.0, "2025-09-29"),
+        _q("2026-03-30", "2026-04-20", 20.0, "2025-12-30"),
+        _q("2026-06-29", "2026-07-15", 30.0, "2026-03-31"),
+        _q("2026-10-05", "2026-10-20", 40.0, "2026-06-30"),
+    ]
+    assert valuation.ttm_at(facts, "2026-11-01") == pytest.approx(100.0)
+
+
 def test_ttm_series_is_a_step_function_that_moves_on_filing_dates():
     dates = pd.to_datetime(["2026-07-30", "2026-07-31", "2026-08-01"])
     s = valuation.ttm_series(_four_quarters(), dates)
@@ -68,27 +106,61 @@ def test_split_factors_recover_a_ten_for_one_from_the_share_count():
     assert f.loc["2024-06-30"] == pytest.approx(1.0)
 
 
-def test_a_negative_synthesized_q4_share_count_is_dropped_not_used():
-    # WeightedAverageNumberOfDilutedSharesOutstanding is an AVERAGE, not a
-    # sum, so xbrl.quarterly()'s uniform FY-(Q1+Q2+Q3) reconstruction -- built
-    # for additive concepts like net income -- synthesizes a Q4 close to -2x
-    # the true count whenever a filer's annual average is close to any one
-    # quarter's average. Measured live: MSFT's stored Q4 share fact is
-    # -14.9e9 against a true ~7.45e9. valuation.py cannot un-corrupt the
-    # number, but it must not turn a market cap negative either -- the last
-    # genuine quarter's count should carry forward instead.
+def test_the_root_cause_no_longer_synthesizes_a_bad_q4_to_drop():
+    # Task 11 found xbrl.quarterly()'s uniform FY-(Q1+Q2+Q3) reconstruction
+    # synthesizing a Q4 close to -2x the true diluted share count (measured
+    # live: MSFT's stored Q4 share fact was -14.9e9 against a true ~7.45e9)
+    # and worked around it here with a "drop a non-positive share fact"
+    # filter. Task 11.5 moved the real fix into xbrl.quarterly() itself
+    # (NON_ADDITIVE_CONCEPTS) -- this test proves that end to end: run the
+    # filer's real quarters plus its annual figure through quarterly() itself
+    # (as backfill_xbrl.sweep_ticker does before anything reaches the store),
+    # and confirm no bad Q4 is even produced for shares_series to need to
+    # filter. The filter itself (_drop_impossible_shares) stays in
+    # valuation.py regardless -- see the tests below and its own docstring --
+    # because the live store still holds 4,526 rows the pre-fix code wrote
+    # before this task, which the fix cannot reach backwards.
+    tag = "WeightedAverageNumberOfDilutedSharesOutstanding"
+    filed = "2026-07-29"
+    raw = [
+        Fact("T", tag, "2025-07-01", "2025-09-30", 2025, "Q3", "10-Q",
+             "2025-10-30", 7.40e9),
+        Fact("T", tag, "2025-10-01", "2025-12-31", 2025, "Q4", "10-Q",
+             "2026-02-15", 7.42e9),
+        Fact("T", tag, "2026-01-01", "2026-03-31", 2026, "Q1", "10-Q",
+             "2026-04-30", 7.46e9),
+        Fact("T", tag, "2025-07-01", "2026-06-30", 2026, "FY", "10-K",
+             filed, 7.45e9),
+    ]
+    quarters = xbrl.quarterly(raw)
+    assert [f for f in quarters if f.period_end == "2026-06-30"] == [], \
+        "no Q4 should ever be synthesized for a non-additive concept"
+
+    dates = pd.to_datetime(["2026-08-01"])
+    s = valuation.shares_series(quarters, dates)
+    assert s.iloc[0] == pytest.approx(7.46e9), \
+        "forward-fills from the last real quarter; there is no Q4 to use"
+
+
+def test_a_legacy_poisoned_share_count_already_in_the_store_is_dropped_not_used():
+    # The fix above stops any FUTURE sweep from writing one of these, but it
+    # cannot reach backwards: the live store was populated by the pre-fix
+    # xbrl.quarterly() and still holds 4,526 such rows across 133 of 149
+    # tickers (measured directly; see _drop_impossible_shares's docstring).
+    # A fact reaching valuation.py exactly this shape -- a synthesized Q4
+    # already sitting at rest in `reported` -- must still be refused.
     good_q3 = _q("2026-03-31", "2026-04-30", 7.46e9, "2026-01-01", 2026, "Q3")
     bad_q4 = _q("2026-06-30", "2026-07-29", -14.9e9, "2026-03-31", 2026, "Q4")
     dates = pd.to_datetime(["2026-08-01"])
     s = valuation.shares_series([good_q3, bad_q4], dates)
     assert s.iloc[0] == pytest.approx(7.46e9), \
-        "the negative synthesized fact must not overwrite the real quarter"
+        "a legacy negative fact must not overwrite the real quarter"
 
 
-def test_split_factors_ignores_a_negative_synthesized_share_count_too():
+def test_split_factors_ignores_a_legacy_poisoned_share_count_too():
     # split_factors is called directly by callers other than shares_series
-    # (it has its own tests above), so it must filter a negative synthesized
-    # Q4 on its own rather than relying on a caller to have done it first.
+    # (it has its own tests above), so it must filter a poisoned fact on its
+    # own rather than relying on the other to have cleaned the input first.
     good_q3 = _q("2026-03-31", "2026-04-30", 7.46e9, "2026-01-01", 2026, "Q3")
     bad_q4 = _q("2026-06-30", "2026-07-29", -14.9e9, "2026-03-31", 2026, "Q4")
     factors = valuation.split_factors([good_q3, bad_q4])
@@ -103,6 +175,79 @@ def test_split_factors_ignore_ordinary_buybacks():
         _q("2025-09-30", "2025-10-30", 14.7e9, "2025-07-01", 2025, "Q3"),
     ]
     assert set(valuation.split_factors(shares).round(6)) == {1.0}
+
+
+def _dei(end, filed, value):
+    return Fact("T", "EntityCommonStockSharesOutstanding", "", end, None,
+               None, "10-Q", filed, value)
+
+
+def test_prefer_live_uses_the_preferred_series_wherever_it_is_live():
+    preferred = [_dei("2026-06-30", "2026-07-31", 1000.0)]
+    fallback = [
+        _q("2026-06-30", "2026-07-31", 950.0, "2026-04-01", 2026, "Q2"),
+        _q("2025-06-30", "2025-07-31", 900.0, "2025-04-01", 2025, "Q2"),
+    ]
+    out = valuation._prefer_live(preferred, fallback)
+    # The period dei already covers (2026-06-30) must come from dei alone --
+    # reporting it from both would render as a revision that never happened.
+    assert out == [preferred[0], fallback[1]]
+
+
+def test_prefer_live_ignores_a_preferred_series_that_has_gone_stale():
+    # CHTR's real shape: dei stops at 2016-08-09 while the weighted-average
+    # series keeps being filed to the present. Unguarded, forward-filling the
+    # decade-old dei count into today overstated market cap by 101%.
+    # LIVE_WINDOW_DAYS is the same staleness tolerance xbrl.splice already
+    # uses for exactly this "has a tag stopped being filed" question.
+    preferred = [_dei("2016-08-09", "2016-08-09", 400.0e6)]
+    fallback = [_q("2026-06-30", "2026-07-31", 150.0e6, "2026-04-01",
+                   2026, "Q2")]
+    out = valuation._prefer_live(preferred, fallback)
+    assert out == fallback, "a decade-stale dei count must not be used at all"
+
+
+def test_prefer_live_with_nothing_on_one_side_returns_the_other_untouched():
+    facts = [_q("2026-06-30", "2026-07-31", 950.0, "2026-04-01", 2026, "Q2")]
+    assert valuation._prefer_live([], facts) == facts
+    assert valuation._prefer_live(facts, []) == facts
+
+
+def test_sum_same_filing_adds_multiple_share_classes_on_one_filing():
+    # dei:EntityCommonStockSharesOutstanding is tagged once per class of
+    # stock for a multi-class filer -- CHTR carries two entries sharing one
+    # filed date for 1 of its 22 filings. Market cap wants their sum.
+    class_a = _dei("2026-06-30", "2026-07-31", 100.0)
+    class_b = _dei("2026-06-30", "2026-07-31", 50.0)
+    out = valuation._sum_same_filing([class_a, class_b])
+    assert len(out) == 1
+    assert out[0].value == pytest.approx(150.0)
+
+
+def test_sum_same_filing_leaves_separate_filings_alone():
+    older = _dei("2026-03-31", "2026-04-30", 90.0)
+    newer = _dei("2026-06-30", "2026-07-31", 100.0)
+    out = valuation._sum_same_filing([older, newer])
+    assert {f.value for f in out} == {90.0, 100.0}
+
+
+def test_shares_series_prefers_dei_over_the_weighted_average_when_live():
+    dates = pd.to_datetime(["2026-08-01"])
+    dei = [_dei("2026-06-30", "2026-07-31", 1000.0)]
+    weighted = [_q("2026-06-30", "2026-07-31", 950.0, "2026-04-01",
+                   2026, "Q2")]
+    s = valuation.shares_series(weighted, dates, dei_facts=dei)
+    assert s.iloc[0] == pytest.approx(1000.0)
+
+
+def test_shares_series_defaults_to_the_weighted_average_with_no_dei_facts():
+    # dei_facts=None must reproduce the pre-Task-11.5 behavior exactly, for
+    # every caller that has not been updated to supply it.
+    dates = pd.to_datetime(["2026-08-01"])
+    weighted = [_q("2026-06-30", "2026-07-31", 950.0, "2026-04-01",
+                   2026, "Q2")]
+    s = valuation.shares_series(weighted, dates)
+    assert s.iloc[0] == pytest.approx(950.0)
 
 
 def test_a_reversed_duration_fact_is_dropped_from_ttm():
