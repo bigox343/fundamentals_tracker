@@ -88,3 +88,13 @@ def test_all_zero_reference_values_cannot_pass():
     # median is computed, so the error must be nan, not a numeric fluke.
     assert math.isnan(err)
     assert not ok
+
+
+def test_report_marks_a_failing_pair_as_not_passed():
+    frame = prove.summarize({
+        ("AAPL", "trailingPE"): (0.002, True),
+        ("NET", "evEbitda"): (0.51, False),
+    })
+    assert set(frame.columns) == {"ticker", "metric", "median_error", "passed"}
+    assert not frame.set_index(["ticker", "metric"]).loc[
+        ("NET", "evEbitda"), "passed"]

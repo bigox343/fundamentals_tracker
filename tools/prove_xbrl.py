@@ -37,3 +37,32 @@ def proof(recon: pd.Series, reference: pd.Series) -> tuple[float, bool]:
         return float("nan"), False
     err = float(((pair.r - pair.y) / pair.y).abs().median())
     return err, err < PASS_TOLERANCE
+
+
+def summarize(results: dict) -> pd.DataFrame:
+    """(ticker, metric) -> (median_error, passed), as a frame."""
+    return pd.DataFrame(
+        [{"ticker": t, "metric": m, "median_error": e, "passed": ok}
+         for (t, m), (e, ok) in sorted(results.items())])
+
+
+def report(conn) -> pd.DataFrame:
+    """Prove every (ticker, metric) against Yahoo's own published value."""
+    import valuation
+    snap = pd.read_sql_query(
+        "SELECT ticker, as_of, metric, value FROM metrics "
+        "WHERE period_type='snapshot' AND metric IN "
+        "('trailingPE','ps','evEbitda','fcfYield')", conn)
+    tickers = sorted(snap.ticker.unique())
+    built = valuation.build_all(conn, tickers)
+    results = {}
+    for ticker, frame in built.items():
+        ref_all = snap[snap.ticker == ticker]
+        for metric in frame.columns:
+            ref = ref_all[ref_all.metric == metric]
+            if ref.empty:
+                continue
+            reference = pd.Series(ref.value.values,
+                                  index=pd.DatetimeIndex(ref.as_of))
+            results[(ticker, metric)] = proof(frame[metric], reference)
+    return summarize(results)
