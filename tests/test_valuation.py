@@ -143,12 +143,13 @@ def test_the_root_cause_no_longer_synthesizes_a_bad_q4_to_drop():
 
 
 def test_a_legacy_poisoned_share_count_already_in_the_store_is_dropped_not_used():
-    # The fix above stops any FUTURE sweep from writing one of these, but it
-    # cannot reach backwards: the live store was populated by the pre-fix
-    # xbrl.quarterly() and still holds 4,526 such rows across 133 of 149
-    # tickers (measured directly; see _drop_impossible_shares's docstring).
-    # A fact reaching valuation.py exactly this shape -- a synthesized Q4
-    # already sitting at rest in `reported` -- must still be refused.
+    # The fix above stops any FUTURE sweep from writing one of these. The
+    # store that carried 4,526 of them across 133 of 149 tickers has since
+    # been cleared and refetched, and data/reported.csv.gz rewritten from it,
+    # so neither the live store nor the rebuild path holds one today. The
+    # guard stays regardless: it is cheap, and a fact of exactly this shape --
+    # a synthesized Q4 for a non-additive concept -- must be refused wherever
+    # it comes from, including an older archive someone restores by hand.
     good_q3 = _q("2026-03-31", "2026-04-30", 7.46e9, "2026-01-01", 2026, "Q3")
     bad_q4 = _q("2026-06-30", "2026-07-29", -14.9e9, "2026-03-31", 2026, "Q4")
     dates = pd.to_datetime(["2026-08-01"])
@@ -427,15 +428,23 @@ def test_ev_ebitda_zero_fills_only_the_debt_tag_that_is_actually_missing():
 
 
 def test_own_percentile_places_today_in_its_own_range():
-    s = pd.Series(range(100), dtype=float)
-    assert valuation.own_percentile(s) == pytest.approx(0.99, abs=0.02)
-    assert valuation.own_percentile(pd.Series([5.0, 4.0, 3.0, 2.0, 1.0])) \
-        == pytest.approx(0.0, abs=0.01)
+    # Series long enough to clear MIN_HISTORY, which is a full year of trading
+    # days: a percentile is only meaningful against a real range.
+    rising = pd.Series(range(300), dtype=float)
+    assert valuation.own_percentile(rising) == pytest.approx(0.997, abs=0.01)
+    falling = pd.Series(range(300, 0, -1), dtype=float)
+    assert valuation.own_percentile(falling) == pytest.approx(0.0, abs=0.01)
 
 
 def test_own_percentile_needs_a_real_history():
+    # A handful of points is not a range. Painting a percentile from three
+    # observations onto a cell labelled "vs own history" would be a confident
+    # answer drawn from nothing.
     assert valuation.own_percentile(pd.Series([1.0, 2.0])) is None
     assert valuation.own_percentile(pd.Series(dtype=float)) is None
+    assert valuation.own_percentile(pd.Series([5.0, 4.0, 3.0])) is None
+    assert valuation.own_percentile(pd.Series(range(249), dtype=float)) is None
+    assert valuation.own_percentile(pd.Series(range(250), dtype=float)) is not None
 
 
 def test_a_proxy_statements_pay_versus_performance_net_income_is_not_used():

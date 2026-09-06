@@ -338,22 +338,23 @@ METRIC_SPECS: dict[str, tuple[str, ...]] = {
     "fcfYield":   ("cfo", "capex"),
 }
 
-# Below this many observations an "own range" is not a range.
+# Below this many observations an "own range" is not a range. Roughly one
+# fiscal year of trading days.
 #
-# The brief's own draft set this to 250 ("roughly one fiscal year of trading
-# days"), but that value is inconsistent with the brief's own Step 1 tests:
-# test_own_percentile_places_today_in_its_own_range asserts a real (non-None)
-# percentile for a 5-observation series, and even its first assertion (a
-# 100-observation series) would return None at MIN_HISTORY=250 -- neither
-# test was ever run against that value. Set to 3, the smallest floor that
-# still passes test_own_percentile_needs_a_real_history (2 observations ->
-# None) while letting the 5- and 100-observation cases through: below 3
-# points there is no interior position to report (2 points are simply
-# "above" or "below" the other). Production callers that want a full-year
-# floor before showing a percentile badge can still apply MIN_HISTORY -- or
-# their own stricter one -- at the call site; this floor guards the
-# statistic itself, not any calendar convention.
-MIN_HISTORY = 3
+# The Task 11 brief set this to 250 and then tested it with a 5-observation
+# series, so the constant and its own test contradicted each other. That was
+# resolved by dropping the floor to 3, on the reasoning that 3 points are the
+# fewest with an interior position and that callers could impose their own
+# calendar floor. The test was the wrong half to keep. A percentile drawn from
+# 3 observations, painted onto a cell labelled "vs own history", is precisely
+# the plausible-wrong-number this module exists to refuse -- and a floor that
+# every caller must remember to re-apply is one a caller will forget.
+#
+# Restoring it costs nothing measurable: of the pairs carrying any value at
+# all, ps has 134 with at least 250 observations and trailingPE 124, against a
+# median of 1,255 -- the full five-year window. The floor excludes degenerate
+# series, not real ones.
+MIN_HISTORY = 250
 
 
 def _ttm(facts_by_tag: dict, name: str, dates) -> pd.Series:
