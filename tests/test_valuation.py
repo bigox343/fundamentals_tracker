@@ -215,21 +215,27 @@ def test_prefer_live_with_nothing_on_one_side_returns_the_other_untouched():
     assert valuation._prefer_live(facts, []) == facts
 
 
-def test_sum_same_filing_adds_multiple_share_classes_on_one_filing():
-    # dei:EntityCommonStockSharesOutstanding is tagged once per class of
-    # stock for a multi-class filer -- CHTR carries two entries sharing one
-    # filed date for 1 of its 22 filings. Market cap wants their sum.
-    class_a = _dei("2026-06-30", "2026-07-31", 100.0)
-    class_b = _dei("2026-06-30", "2026-07-31", 50.0)
-    out = valuation._sum_same_filing([class_a, class_b])
+def test_a_filing_and_its_same_day_amendment_are_one_count_not_two():
+    # This used to sum the group, on the theory that a multi-class filer tags
+    # the cover-page count once per class. Checked against SEC across 70
+    # tickers: all 5 groups carrying more than one entry hold a filing and its
+    # own same-day amendment with the IDENTICAL number -- AMD's 10-K and
+    # 10-K/A both say 1,630,410,843 on 2026-02-04, and CHTR and BKNG match
+    # that shape. No group anywhere had differing values. Summing would have
+    # doubled the share count and halved those market caps; only the store's
+    # primary key collapsing the siblings first kept it from ever firing.
+    original = _dei("2026-01-30", "2026-02-04", 1_630_410_843.0)
+    amendment = _dei("2026-01-30", "2026-02-04", 1_630_410_843.0)
+    out = valuation._one_per_filing([original, amendment])
     assert len(out) == 1
-    assert out[0].value == pytest.approx(150.0)
+    assert out[0].value == pytest.approx(1_630_410_843.0), \
+        "summing an amendment onto its own original doubles the count"
 
 
-def test_sum_same_filing_leaves_separate_filings_alone():
+def test_separate_filings_are_left_alone():
     older = _dei("2026-03-31", "2026-04-30", 90.0)
     newer = _dei("2026-06-30", "2026-07-31", 100.0)
-    out = valuation._sum_same_filing([older, newer])
+    out = valuation._one_per_filing([older, newer])
     assert {f.value for f in out} == {90.0, 100.0}
 
 

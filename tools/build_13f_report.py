@@ -136,7 +136,14 @@ def build(conn, quarter: str | None, out_dir: Path) -> Path:
     # -- crowding ----------------------------------------------------------
     crowd = held.groupby("ticker").agg(
         funds=("fund", "nunique"), value=("value", "sum")).reset_index()
-    crowd["net"] = crowd.ticker.map(changes.groupby("ticker").delta_shares.sum())
+    # A NEW position has prev_shares NaN, so delta_shares is NaN and sum()
+    # skips it -- a name every tracked manager newly bought aggregated to
+    # net = 0 and rendered "flat", which is the strongest accumulation
+    # signal in the dataset reading as no change. Where the manager filed
+    # for the prior quarter, the prior count is genuinely zero.
+    _net = changes.assign(
+        delta_shares=changes.delta_shares.fillna(changes.shares))
+    crowd["net"] = crowd.ticker.map(_net.groupby("ticker").delta_shares.sum())
     crowd["adds"] = crowd.ticker.map(
         changes[changes.action.isin(["ADD", "NEW"])].groupby("ticker").size()).fillna(0)
     crowd["cuts"] = crowd.ticker.map(

@@ -2,8 +2,11 @@
 # Daily driver for the fundamentals tracker, invoked by the LaunchAgent
 # com.owen.fundamentals-tracker. Safe to run by hand too:  ./run_daily.sh
 #
-# Raw CSVs in data/ are never pruned: they are the durable record from which
-# history.db is rebuilt, and the estimate files cannot be refetched.
+# Raw CSVs in data/ are pruned to the newest RETAIN_DATED of each kind by
+# build_dashboard.prune_dated_files, and only once the store confirms it holds
+# that date -- so a run that fetched but failed to record cannot have its
+# evidence deleted by the next one. history.db and the committed archives
+# (reported.csv.gz, cusip_map.csv) are the durable record.
 #
 # No locking here -- build_dashboard.py takes an fcntl lock itself, because
 # macOS ships no flock(1).

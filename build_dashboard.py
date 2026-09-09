@@ -764,8 +764,15 @@ def own_history(conn, df) -> tuple[dict, dict]:
             # whose depth is whatever it has accrued -- so c1w resolves and
             # c1m does not yet, and a window with too little depth yields no
             # entry rather than a zero.
+            # skip is (ticker, metric) pairs, not bare metric names. Collapsed
+            # to names, one ticker passing the proof for ps would suppress
+            # snapshot-derived ps changes for all 149 -- including the tickers
+            # whose reconstruction was rejected and which therefore get no
+            # derived change either, leaving those cells blank in the change
+            # frames even though the snapshot series behind their displayed
+            # level has the depth to answer.
             derived.update(valuation.snapshot_changes(
-                conn, points, skip=frozenset(m for _t, m in ok)))
+                conn, points, skip=frozenset(ok)))
         except Exception as exc:  # noqa: BLE001
             print(f"  snapshot change frames unavailable: {exc}",
                   file=sys.stderr)

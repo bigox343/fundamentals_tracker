@@ -63,6 +63,12 @@ def momentum_signal(conn, as_of: str, lookback: int = 252,
         return pd.Series(dtype=float)
 
     wide = closes.pivot(index="as_of", columns="ticker", values="value")
+    # Both indices need the guard, not just `lookback`. A fresh store, or a
+    # rebuild before the first price run, has fewer rows than `skip` and
+    # wide.iloc[-(skip + 1)] then raises IndexError -- taking down the whole
+    # portfolio solve rather than contributing an empty leg.
+    if len(wide) < skip + 2:
+        return pd.Series(dtype=float)
     if len(wide) < lookback + 1:
         lookback = len(wide) - 1
 

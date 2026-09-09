@@ -295,28 +295,34 @@ def _prefer_live(preferred: list, fallback: list) -> list:
     return preferred + [f for f in fallback if f.period_end < cut]
 
 
-def _sum_same_filing(facts: list) -> list:
-    """Collapse a multi-class filer's several cover-page entries into one.
+def _one_per_filing(facts: list) -> list:
+    """One cover-page count per (filed, period_end).
 
-    dei:EntityCommonStockSharesOutstanding is tagged once per class of stock
-    for a filer with more than one -- each entry is a real share count for
-    one class, sharing the same filed date (and, since these are instant
-    facts on the same cover page, the same period_end), and the market-cap
-    basis wants their sum, not one taken arbitrarily. Grouped on the pair
-    rather than filed alone as a defensive measure: nothing observed in the
-    store carries two different period_ends under one filed date for this
-    concept, but collapsing across periods by accident would be silent and
-    much worse than doing nothing on the rare filing that did.
+    This function used to SUM the group, on the theory that a multi-class
+    filer tags EntityCommonStockSharesOutstanding once per class and the
+    market-cap basis wants the total. Checked against SEC across 70 tickers:
+    every group with more than one entry -- 5 of them -- holds a filing and
+    its own same-day amendment carrying the IDENTICAL number, never two
+    classes. AMD's 10-K and 10-K/A both say 1,630,410,843 on 2026-02-04;
+    CHTR and BKNG have the same shape. Zero groups anywhere had differing
+    values.
+
+    So summing would have doubled the share count and halved the market cap
+    for those filers. The store's primary key -- (ticker, concept,
+    period_end, period_start, filed) -- collapsed the siblings before this
+    function ever saw them, which is the only reason the bug never fired.
+    Relying on that is not a guard, so the collapse is explicit here and
+    keeps the newest form rather than adding two copies of one number.
+
+    If SEC ever does serve genuinely per-class entries, they are
+    indistinguishable here: the companyconcept endpoint carries no class
+    dimension. That would need the class in the store's key, not a sum at
+    read time.
     """
-    by_key: dict[tuple[str, str], list] = {}
+    by_key: dict[tuple[str, str], object] = {}
     for f in facts:
-        by_key.setdefault((f.filed, f.period_end), []).append(f)
-    out = []
-    for group in by_key.values():
-        rep = group[0]
-        out.append(rep if len(group) == 1
-                   else rep._replace(value=sum(g.value for g in group)))
-    return out
+        by_key[(f.filed, f.period_end)] = f
+    return list(by_key.values())
 
 
 def shares_series(share_facts, dates, dei_facts=None) -> pd.Series:
@@ -337,7 +343,7 @@ def shares_series(share_facts, dates, dei_facts=None) -> pd.Series:
     quarterly() (INSTANT_CONCEPTS), so it cannot carry this defect.
     """
     fallback = _drop_impossible_shares(share_facts)
-    preferred = _sum_same_filing(dei_facts or [])
+    preferred = _one_per_filing(dei_facts or [])
     chosen = _prefer_live(preferred, fallback)
     # Split detection runs PER SOURCE, never across the splice. The two series
     # are not even on the same unit basis for every filer: measured on the live
@@ -569,7 +575,7 @@ def build_all(conn, tickers) -> dict:
         tf = facts[facts.ticker == ticker]
         by_tag = {name: _facts_for(tf, chain)
                   for name, chain in _CHAINS.items()}
-        by_tag.update({name: _sum_same_filing(_facts_for(tf, chain))
+        by_tag.update({name: _one_per_filing(_facts_for(tf, chain))
                       for name, chain in _DEI_CHAINS.items()})
         try:
             out[ticker] = multiple_series(ticker, by_tag, series)
@@ -648,6 +654,8 @@ def changes(built: dict, proven: set, points_metrics: frozenset) -> dict:
 
 def snapshot_changes(conn, points_metrics: frozenset,
                      skip: frozenset = frozenset()) -> dict:
+    # `skip` holds (ticker, metric) pairs already answered by a derived daily
+    # series -- see the note at its call site in build_dashboard.own_history.
     """The same, for metrics that only exist in the snapshot table.
 
     These have no derived daily series, so their depth is whatever `snapshot`
@@ -661,7 +669,10 @@ def snapshot_changes(conn, points_metrics: frozenset,
         "WHERE period_type = 'snapshot'", conn)
     out: dict = {}
     for (ticker, metric), group in frame.groupby(["ticker", "metric"]):
-        if metric in skip:
+        # (ticker, metric), because the derived series that supersedes this one
+        # is proven per pair. A bare metric name would let one ticker's proof
+        # suppress every other ticker's snapshot change for that metric.
+        if (ticker, metric) in skip:
             continue
         series = group.sort_values("as_of").value
         for name, sessions in WINDOWS.items():
