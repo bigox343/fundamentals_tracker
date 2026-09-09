@@ -624,3 +624,69 @@ def test_a_negative_valued_metric_still_yields_an_event():
     # would divide by a negative and mis-sign the comparison.
     v = _s(["2026-09-03", "2026-09-04"], [-2.0, -3.0])
     assert valuation.data_events(v, []) == [("2026-09-04", "revision")]
+
+
+def _dei(end, filed, value):
+    return Fact("T", "EntityCommonStockSharesOutstanding", "", end,
+                None, None, "10-Q", filed, value)
+
+
+def test_the_cover_page_count_wins_a_filed_date_it_shares_with_the_average():
+    # A 10-K republishes older periods as comparatives under its own filing
+    # date, so one `filed` routinely carries both a cover-page count and a
+    # weighted-average fact -- 5,048 such dates in the live store. The step
+    # function collapses on `filed`, and dict() keeps the last write, so
+    # without an explicit preference the winner is decided by which list got
+    # concatenated second. That is the fallback, which is the opposite of the
+    # intent: the whole point of the dei series is to be the market-cap basis.
+    dei = [_dei("2026-03-31", "2026-04-30", 1000.0),
+           _dei("2026-06-30", "2026-07-31", 1010.0)]
+    # same filed dates, older periods -- the comparative shape
+    wavg = [_q("2024-03-31", "2026-04-30", 980.0, "2024-01-01"),
+            _q("2024-06-30", "2026-07-31", 985.0, "2024-04-01")]
+    dates = pd.to_datetime(["2026-04-30", "2026-07-31"])
+    s = valuation.shares_series(wavg, dates, dei_facts=dei)
+    assert s.iloc[0] == pytest.approx(1000.0), "the count, not the average"
+    assert s.iloc[1] == pytest.approx(1010.0)
+
+
+def test_a_stale_cover_page_series_still_falls_back_to_the_average():
+    # The other direction, and the one that actually occurs: seven tickers in
+    # the live store (ACN, CHTR, CMCSA, NKE, QSR, UPS, WDAY) stopped tagging
+    # the cover-page count years ago. Preferring it there would forward-fill a
+    # decade-old number -- CHTR's overstates market cap by 101%. Falling back
+    # is correct behaviour, not a defect.
+    dei = [_dei("2012-03-31", "2012-04-30", 500.0)]
+    wavg = [_q("2026-03-31", "2026-04-30", 1000.0, "2026-01-01")]
+    dates = pd.to_datetime(["2026-04-30"])
+    s = valuation.shares_series(wavg, dates, dei_facts=dei)
+    assert s.iloc[0] == pytest.approx(1000.0), "stale dei must not win"
+
+
+def test_a_step_between_the_two_share_sources_is_not_read_as_a_split():
+    # Measured on the live store, 12 tickers step across the dei/weighted
+    # boundary by enough for split_factors to notice. Most are unit
+    # mismatches so extreme that history._snap_split already refuses them
+    # (MO 1,001,140x, CSX 958x -> 1.0). The dangerous ones are the PLAUSIBLE
+    # ratios: ALAB steps 52,532,000 -> 155,701,301, which is 2.96 and snaps
+    # to a clean 3:1, and CRDO steps 1.96 and snaps to 2:1. Neither company
+    # split; the two series simply measure different things. Snapping there
+    # retroactively triples every earlier share count and rescales the whole
+    # pre-boundary market cap.
+    wavg = [_q("2024-01-31", "2024-02-28", 52_532_000.0, "2023-11-01"),
+            _q("2024-03-31", "2024-04-30", 52_600_000.0, "2024-01-01")]
+    dei = [_dei("2024-04-30", "2024-05-30", 155_701_301.0),
+           _dei("2024-07-31", "2024-08-30", 156_000_000.0)]
+    factors = valuation.split_factors(valuation._prefer_live(dei, wavg))
+    assert set(factors.round(6)) == {1.0}, (
+        "a 2.96x step between two different share series was snapped to a "
+        f"3:1 split: {factors.to_dict()}")
+
+
+def test_a_real_split_inside_one_source_is_still_detected():
+    # The guard above must not cost the detection it sits beside.
+    shares = [_q("2024-03-31", "2024-04-30", 2.47e9, "2024-01-01"),
+              _q("2024-06-30", "2024-07-30", 24.6e9, "2024-04-01"),
+              _q("2024-09-30", "2024-10-30", 24.7e9, "2024-07-01")]
+    f = valuation.split_factors(shares)
+    assert f.loc["2024-03-31"] == pytest.approx(10.0)

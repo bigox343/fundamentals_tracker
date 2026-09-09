@@ -218,6 +218,19 @@ def split_factors(share_facts) -> pd.Series:
     stored closes are back-adjusted, and a 25:1 split rendered as a manager
     adding 2,400%.
 
+    Detection runs WITHIN a concept, never across two. A caller may hand in a
+    stream spliced from more than one source -- shares_series does exactly
+    that, preferring the dei cover-page count and falling back to the
+    weighted average -- and the step where one source hands over to the other
+    is not a corporate event. Measured on the live store, 12 tickers show such
+    a step. Most are unit mismatches so extreme that history._snap_split
+    already refuses them (MO 2,069 -> 2,071,359,145, a filer reporting the
+    average in thousands against a count in units; CSX 958x). The dangerous
+    ones are the plausible ratios: ALAB steps 52,532,000 -> 155,701,301, which
+    is 2.96 and snaps to a clean 3:1, and CRDO steps 1.96 and snaps to 2:1.
+    Neither split. Grouping by concept costs nothing for the single-source
+    callers and makes the guard intrinsic, so no caller has to remember it.
+
     Filters through _drop_impossible_shares independently of shares_series --
     both are public functions callers may use directly (shares_series has its
     own tests calling it standalone below), so each must be robust to a
@@ -225,20 +238,28 @@ def split_factors(share_facts) -> pd.Series:
     the input first.
     """
     share_facts = _drop_impossible_shares(share_facts)
-    ordered = sorted({f.period_end: f for f in share_facts}.values(),
-                     key=lambda f: f.period_end)
-    ends = [f.period_end for f in ordered]
-    factors = pd.Series(1.0, index=ends)
-    if len(ordered) < 2:
-        return factors
-    cumulative = 1.0
-    for i in range(len(ordered) - 1, 0, -1):
-        prev, cur = ordered[i - 1].value, ordered[i].value
-        ratio = (cur / prev) if prev else 1.0
-        if ratio >= SPLIT_MIN_RATIO:
-            cumulative *= history._snap_split(ratio)
-        factors.iloc[i - 1] = cumulative
-    return factors
+    by_concept: dict[str, list] = {}
+    for f in share_facts:
+        by_concept.setdefault(f.concept, []).append(f)
+
+    pieces = []
+    for facts in by_concept.values():
+        ordered = sorted({f.period_end: f for f in facts}.values(),
+                         key=lambda f: f.period_end)
+        ends = [f.period_end for f in ordered]
+        factors = pd.Series(1.0, index=ends)
+        cumulative = 1.0
+        for i in range(len(ordered) - 1, 0, -1):
+            prev, cur = ordered[i - 1].value, ordered[i].value
+            ratio = (cur / prev) if prev else 1.0
+            if ratio >= SPLIT_MIN_RATIO:
+                cumulative *= history._snap_split(ratio)
+            factors.iloc[i - 1] = cumulative
+        pieces.append(factors)
+    if not pieces:
+        return pd.Series(dtype=float)
+    out = pd.concat(pieces)
+    return out[~out.index.duplicated(keep="first")]
 
 
 def _prefer_live(preferred: list, fallback: list) -> list:
@@ -315,12 +336,35 @@ def shares_series(share_facts, dates, dei_facts=None) -> pd.Series:
     fixed. dei_facts is not filtered here: it is never run through
     quarterly() (INSTANT_CONCEPTS), so it cannot carry this defect.
     """
-    share_facts = _drop_impossible_shares(share_facts)
-    share_facts = _prefer_live(dei_facts or [], share_facts)
-    factors = split_factors(share_facts)
+    fallback = _drop_impossible_shares(share_facts)
+    preferred = _sum_same_filing(dei_facts or [])
+    chosen = _prefer_live(preferred, fallback)
+    # Split detection runs PER SOURCE, never across the splice. The two series
+    # are not even on the same unit basis for every filer: measured on the live
+    # store, 12 tickers show a cross-source step that split_factors would read
+    # as a split, and the ratios are not subtle -- MO 2,069 -> 2,071,359,145
+    # (a filer reporting the weighted average in thousands against a
+    # cover-page count in units), CSX 958x, HUBS 5,344x. Snapping one of those
+    # and applying it to every earlier period would rescale the whole
+    # pre-boundary history by six orders of magnitude. A split is a corporate
+    # event visible within one series; a step between two different series
+    # measuring two different things is not evidence of one.
+    factors = split_factors(chosen)
+    # Preference has to survive the collapse to a step function, not just the
+    # splice. 5,048 filed dates in the live store carry BOTH a cover-page
+    # count and a weighted-average fact -- routine, because a 10-K republishes
+    # older periods as comparatives under its own filing date. dict() keeps
+    # the last write per key and sorted() is stable, so ordering by `filed`
+    # alone handed those dates to whichever list _prefer_live concatenated
+    # second, which is the fallback. Measured before this fix: 7 of 125
+    # tickers (ACN, CHTR, CMCSA, NKE, QSR, UPS, WDAY) ended on the average
+    # rather than the count, up to 10% wrong -- silently undoing the market
+    # cap basis this argument exists to provide. Sorting preferred LAST within
+    # a filed date makes it win the overwrite.
+    preferred_set = set(preferred)
     adjusted = [
         (f.filed, f.value * float(factors.get(f.period_end, 1.0)))
-        for f in sorted(share_facts, key=lambda f: f.filed)
+        for f in sorted(chosen, key=lambda f: (f.filed, f in preferred_set))
     ]
     if not adjusted:
         return pd.Series(index=pd.DatetimeIndex(dates), dtype=float)
