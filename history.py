@@ -889,11 +889,25 @@ def last_sweep(conn: sqlite3.Connection) -> str | None:
     return row[0] if row and row[0] else None
 
 
-def thirteenf_quarters(conn: sqlite3.Connection) -> list[str]:
-    """Quarters with at least one ingested filing, newest first."""
+def thirteenf_quarters(conn: sqlite3.Connection,
+                       known_by: str | None = None) -> list[str]:
+    """Quarters with at least one ingested filing, newest first.
+
+    `known_by` filters on the FILING date, not the quarter end. A 13F for the
+    quarter ending 2025-06-30 is not public until roughly 2025-08-14 -- the
+    45-day deadline in edgar.FILING_LAG_DAYS -- so a backtest that selects
+    quarters by period end is trading on six weeks of information nobody had.
+    Live callers pass nothing and see every ingested quarter, which is correct:
+    a quarter only reaches the store after it was filed.
+    """
+    if known_by is None:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT quarter FROM thirteenf_filings WHERE status = 'ok' "
+            "ORDER BY quarter DESC")]
     return [r[0] for r in conn.execute(
-        "SELECT DISTINCT quarter FROM thirteenf_filings WHERE status = 'ok' "
-        "ORDER BY quarter DESC")]
+        "SELECT DISTINCT quarter FROM thirteenf_filings "
+        "WHERE status = 'ok' AND filed_date IS NOT NULL AND filed_date <= ? "
+        "ORDER BY quarter DESC", (known_by,))]
 
 
 def _book_values(conn: sqlite3.Connection, quarter: str) -> dict[str, float]:

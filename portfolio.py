@@ -81,9 +81,15 @@ def thirteenf_signal(conn, as_of: str) -> pd.Series:
     """
     import history
 
+    # Gated on the FILING date, not the quarter end. A 13F for the quarter
+    # ending 2025-06-30 is not public until roughly 2025-08-14, so selecting
+    # by period end hands the backtest six weeks of lookahead on one of its
+    # three equally weighted legs -- which inflates the reported information
+    # ratio rather than showing up as an error anywhere.
+    #
     # Sorted explicitly: thirteenf_quarters returns newest-first, and relying
     # on that ordering silently inverts the sign of every delta.
-    quarters = sorted(q for q in history.thirteenf_quarters(conn) if q <= as_of)
+    quarters = sorted(history.thirteenf_quarters(conn, known_by=as_of))
     if len(quarters) < 2:
         return pd.Series(dtype=float)
 

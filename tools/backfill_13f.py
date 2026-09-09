@@ -27,7 +27,10 @@ def main() -> int:
     print(f"Backfilling {len(FUNDS)} funds x {len(quarters)} quarters: "
           f"{quarters[-1]} .. {quarters[0]}", flush=True)
 
-    _rows, filings, raw, stale, failed = edgar.collect_13f(
+    # Six values, not five: collect_13f also returns `drift`. Unpacking
+    # five raised ValueError AFTER the whole network sweep completed, so
+    # every downloaded filing was discarded and no archive was written.
+    _rows, filings, raw, stale, failed, _drift = edgar.collect_13f(
         FUNDS, quarters, cusip_map={}, already={})
 
     by_quarter = defaultdict(list)
