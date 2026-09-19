@@ -7,3 +7,22 @@ __pycache__/
 .pytest_cache/
 logs/
 .vscode/
+
+# Generated outputs. Every one of these is rendered from data/history.db on
+# each run, so a committed copy is stale the next day -- and worse, a checkout
+# silently restores the stale copy over fresh output. That is how dashboard.html
+# came to show Costco at $947.74 (its 2026-08-21 price) a month later.
+/dashboard.html
+/history.html
+/reports/*.html
+
+# The day's raw capture. history.db is the store these feed; keeping a handful
+# of arbitrary days in git backed nothing up and made `--no-fetch` render from
+# a month-old snapshot as though it were current. With none present that path
+# fails loudly instead, which is the better failure.
+/data/fundamentals_*.csv.gz
+/data/estimates_*.csv.gz
+/data/holdings_*.csv.gz
+/data/insiders_*.csv.gz
+.DS_Store
+
