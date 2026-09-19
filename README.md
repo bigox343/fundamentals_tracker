@@ -98,6 +98,35 @@ knowledge of SQL.
 
 ## The data
 
+### Nothing generated is committed
+
+`dashboard.html`, `history.html` and everything under `reports/` are rendered
+from `data/history.db` on every run, and none of them is version controlled.
+
+That is a correctness rule, not tidiness. A committed render is stale the next
+day, and a checkout restores it *over* fresh output without saying so — which
+is exactly how `dashboard.html` came to show Costco at **$947.74**, its
+2026-08-21 price, nearly a month later, while the store held the correct
+$895.31 and every daily run had succeeded. The run log said it had written a
+current page; git had put the old one back.
+
+The day's raw capture (`fundamentals_`, `estimates_`, `holdings_`, `insiders_`)
+is untracked for the same reason. Keeping a handful of arbitrary days in git
+backed nothing up, and it made `--no-fetch` rebuild from a month-old snapshot
+as though it were current. With none present that path fails loudly instead.
+
+Still tracked, because none of it is generated here: `data/13f_*.csv.gz` and
+`13f_filings.csv.gz` (quarterly, and a 13F amended away cannot be refetched),
+`cusip_map.csv` and `ff_factors.csv.gz` (checked-in references), and the report
+template under `tools/`. `tests/test_repo_hygiene.py` pins both halves, so
+neither the rule nor its exceptions can drift back.
+
+**One consequence worth knowing:** `history.db` is gitignored and the daily
+capture no longer is, so this machine holds the only copy of the perishable
+estimate history. Prices and statements are refetchable; forward consensus is
+not. If that matters, back the database up somewhere — a periodic export is the
+right mechanism, not incidentally committed daily files.
+
 ### `data/` is the record of truth
 
 The dated CSVs are gzipped text and are **never pruned**. They compress 5.9x
